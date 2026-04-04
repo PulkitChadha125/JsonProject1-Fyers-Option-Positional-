@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Strategy Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="top-bar">
+        <div class="brand">
+          <span class="brand-mark">◆</span>
+          <span class="brand-name">Strategy</span>
+        </div>
+        <p class="tagline">Trade settings &amp; monitoring</p>
+      </header>
+
+      <main class="main-grid">
+        <section class="panel panel--wide" aria-labelledby="symbol-heading">
+          <div class="panel-head">
+            <h2 id="symbol-heading">Symbol settings</h2>
+            <button type="button" class="btn btn--primary" id="btn-add-setting">
+              Add setting
+            </button>
+          </div>
+          <p class="panel-hint">
+            Rows mirror <code>TradeSettings.csv</code>. Start/stop times use the time picker.
+            Trading on/off updates <code>TRADINGENABLED</code>.
+          </p>
+          <div id="symbol-settings-root" class="symbol-list"></div>
+          <p id="symbol-settings-empty" class="empty-state hidden">
+            No symbol rows yet. Add a setting to create one.
+          </p>
+        </section>
+
+        <section class="panel" aria-labelledby="net-heading">
+          <h2 id="net-heading">Net position</h2>
+          <p class="muted">Live position data will appear here when the strategy engine is connected.</p>
+          <div class="net-placeholder">
+            <span class="net-dash">—</span>
+            <span class="muted small">No open exposure</span>
+          </div>
+        </section>
+
+        <section class="panel panel--tall" aria-labelledby="order-log-heading">
+          <h2 id="order-log-heading">Order log</h2>
+          <div class="log log--orders" id="order-log" role="log" aria-live="polite">
+            <div class="log-line log-line--muted">[00:00:00] Order log ready. No orders yet.</div>
+          </div>
+        </section>
+
+        <section class="panel panel--tall" aria-labelledby="app-log-heading">
+          <h2 id="app-log-heading">App log</h2>
+          <div class="log log--app" id="app-log" role="log" aria-live="polite">
+            <div class="log-line">[system] Dashboard loaded.</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  </body>
+</html>
