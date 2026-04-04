@@ -7,6 +7,8 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
+import strategy_runtime
+
 BASE_DIR = Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / "TradeSettings.csv"
 
@@ -68,7 +70,22 @@ def _default_empty_row(headers: list[str]) -> list[str]:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", active_page="settings")
+
+
+@app.route("/net-position")
+def net_position():
+    return render_template("net_position.html", active_page="net_position")
+
+
+@app.route("/order-log")
+def order_log():
+    return render_template("order_log.html", active_page="order_log")
+
+
+@app.route("/app-log")
+def app_log():
+    return render_template("app_log.html", active_page="app_log")
 
 
 @app.get("/api/settings")
@@ -144,6 +161,42 @@ def api_settings_delete(row_index: int):
     rows.pop(row_index)
     _write_csv(headers, rows)
     return jsonify({"ok": True})
+
+
+@app.get("/api/strategy/status")
+def api_strategy_status():
+    return jsonify(strategy_runtime.get_status())
+
+
+@app.post("/api/strategy/start")
+def api_strategy_start():
+    ok, msg = strategy_runtime.start_strategy()
+    status = 200 if ok else 400
+    return jsonify({"ok": ok, "message": msg, **strategy_runtime.get_status()}), status
+
+
+@app.post("/api/strategy/stop")
+def api_strategy_stop():
+    ok, msg = strategy_runtime.stop_strategy()
+    return jsonify({"ok": ok, "message": msg, **strategy_runtime.get_status()})
+
+
+@app.get("/api/net-positions")
+def api_net_positions():
+    st = strategy_runtime.get_status()
+    if not st["running"]:
+        return jsonify({"positions": [], **st})
+    positions = strategy_runtime.refresh_positions()
+    return jsonify({"positions": positions, **strategy_runtime.get_status()})
+
+
+@app.post("/api/net-positions/<position_id>/exit")
+def api_net_position_exit(position_id: str):
+    ok, msg = strategy_runtime.exit_position(position_id)
+    st = strategy_runtime.get_status()
+    positions = strategy_runtime.refresh_positions() if st["running"] else []
+    status = 200 if ok else 400
+    return jsonify({"ok": ok, "message": msg, "positions": positions, **st}), status
 
 
 if __name__ == "__main__":

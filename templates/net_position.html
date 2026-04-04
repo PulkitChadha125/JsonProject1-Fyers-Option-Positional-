@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Net position · Strategy{% endblock %}
+{% block content %}
+<div class="page">
+  <header class="page-header">
+    <div class="page-header__titles">
+      <h1 class="page-title">Net position</h1>
+      <p class="page-sub muted">
+        Live position data will appear here when the strategy engine is connected.
+      </p>
+    </div>
+    <span class="badge badge--neutral">Strategy: Stopped</span>
+  </header>
+
+  <section class="card">
+    <h2 class="card__title">Positions</h2>
+    <p class="muted card__desc">Updates when the strategy is running.</p>
+    <div class="net-placeholder">
+      <span class="net-dash">—</span>
+      <span class="muted small">No open exposure</span>
+    </div>
+  </section>
+</div>
+{% endblock %}

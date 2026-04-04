@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}App log · Strategy{% endblock %}
+{% block content %}
+<div class="page">
+  <header class="page-header page-header--split">
+    <div class="page-header__titles">
+      <h1 class="page-title">App log</h1>
+      <p class="page-sub muted">Dashboard and settings activity.</p>
+    </div>
+    <button type="button" class="btn btn--danger-outline btn--sm" id="app-log-clear">
+      Clear app log
+    </button>
+  </header>
+
+  <section class="card card--log">
+    <div class="log log--app log--full" id="app-log-page" role="log" aria-live="polite"></div>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/app_log_page.js') }}"></script>
+{% endblock %}

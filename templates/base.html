@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}Strategy{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  </head>
+  <body class="layout">
+    <button
+      type="button"
+      class="sidebar-toggle"
+      aria-expanded="false"
+      aria-controls="sidebar-nav"
+      aria-label="Open menu"
+    >
+      <span class="sidebar-toggle__bar"></span>
+      <span class="sidebar-toggle__bar"></span>
+      <span class="sidebar-toggle__bar"></span>
+    </button>
+    <div class="sidebar-overlay" id="sidebar-overlay" aria-hidden="true"></div>
+    <aside class="sidebar" id="sidebar-nav" aria-label="Main navigation">
+      <div class="sidebar__brand">
+        <span class="sidebar__mark" aria-hidden="true">◆</span>
+        <span class="sidebar__name">Strategy</span>
+      </div>
+      <p class="sidebar__tagline">Trade settings &amp; monitoring</p>
+      <nav class="sidebar__nav">
+        <a
+          href="{{ url_for('index') }}"
+          class="nav-item {% if active_page == 'settings' %}is-active{% endif %}"
+          >Symbol settings</a
+        >
+        <a
+          href="{{ url_for('net_position') }}"
+          class="nav-item {% if active_page == 'net_position' %}is-active{% endif %}"
+          >Net position</a
+        >
+        <a
+          href="{{ url_for('order_log') }}"
+          class="nav-item {% if active_page == 'order_log' %}is-active{% endif %}"
+          >Order log</a
+        >
+        <a
+          href="{{ url_for('app_log') }}"
+          class="nav-item {% if active_page == 'app_log' %}is-active{% endif %}"
+          >App log</a
+        >
+      </nav>
+    </aside>
+
+    <div class="layout__main">
+      {% block content %}{% endblock %}
+    </div>
+
+    <script src="{{ url_for('static', filename='js/common.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/layout.js') }}"></script>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

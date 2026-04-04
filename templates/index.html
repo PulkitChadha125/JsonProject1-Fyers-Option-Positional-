@@ -1,70 +1,109 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Strategy Dashboard</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
-  </head>
-  <body>
-    <div class="app-shell">
-      <header class="top-bar">
-        <div class="brand">
-          <span class="brand-mark">◆</span>
-          <span class="brand-name">Strategy</span>
-        </div>
-        <p class="tagline">Trade settings &amp; monitoring</p>
-      </header>
-
-      <main class="main-grid">
-        <section class="panel panel--wide" aria-labelledby="symbol-heading">
-          <div class="panel-head">
-            <h2 id="symbol-heading">Symbol settings</h2>
-            <button type="button" class="btn btn--primary" id="btn-add-setting">
-              Add setting
-            </button>
-          </div>
-          <p class="panel-hint">
-            Rows mirror <code>TradeSettings.csv</code>. Start/stop times use the time picker.
-            Trading on/off updates <code>TRADINGENABLED</code>.
-          </p>
-          <div id="symbol-settings-root" class="symbol-list"></div>
-          <p id="symbol-settings-empty" class="empty-state hidden">
-            No symbol rows yet. Add a setting to create one.
-          </p>
-        </section>
-
-        <section class="panel" aria-labelledby="net-heading">
-          <h2 id="net-heading">Net position</h2>
-          <p class="muted">Live position data will appear here when the strategy engine is connected.</p>
-          <div class="net-placeholder">
-            <span class="net-dash">—</span>
-            <span class="muted small">No open exposure</span>
-          </div>
-        </section>
-
-        <section class="panel panel--tall" aria-labelledby="order-log-heading">
-          <h2 id="order-log-heading">Order log</h2>
-          <div class="log log--orders" id="order-log" role="log" aria-live="polite">
-            <div class="log-line log-line--muted">[00:00:00] Order log ready. No orders yet.</div>
-          </div>
-        </section>
-
-        <section class="panel panel--tall" aria-labelledby="app-log-heading">
-          <h2 id="app-log-heading">App log</h2>
-          <div class="log log--app" id="app-log" role="log" aria-live="polite">
-            <div class="log-line">[system] Dashboard loaded.</div>
-          </div>
-        </section>
-      </main>
+{% extends "base.html" %}
+{% block title %}Symbol settings · Strategy{% endblock %}
+{% block content %}
+<div class="page page--settings">
+  <header class="page-header page-header--settings-top">
+    <div class="page-header__titles">
+      <h1 class="page-title">Symbol settings</h1>
+      <p class="page-sub muted">
+        Loaded from <code class="inline-code">TradeSettings.csv</code>
+      </p>
     </div>
+    <div class="page-header__strategy" id="strategy-control-cluster">
+      <div class="strategy-status-line">
+        <span
+          class="badge badge--strategy badge--neutral"
+          id="strategy-status-badge"
+          data-state="stopped"
+          >Strategy: Stopped</span
+        >
+        <span class="strategy-conn muted" id="strategy-conn-line" hidden></span>
+      </div>
+      <div class="strategy-actions">
+        <button type="button" class="btn btn--primary btn--sm" id="btn-strategy-start">
+          Start strategy
+        </button>
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-strategy-stop">
+          Stop strategy
+        </button>
+      </div>
+    </div>
+  </header>
 
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
-  </body>
-</html>
+  <div class="toolbar toolbar--wrap">
+    <button type="button" class="btn btn--outline" id="btn-load-set">Load set</button>
+    <button type="button" class="btn btn--outline" id="btn-add-setting">Add new symbol setting</button>
+  </div>
+  <p class="schema-hint muted" id="schema-hint" hidden></p>
+
+  <section class="card card--table" aria-labelledby="table-caption">
+    <h2 id="table-caption" class="visually-hidden">Symbol configuration rows</h2>
+    <div class="table-scroll">
+      <table class="data-table data-table--pinned" id="settings-table">
+        <thead id="settings-thead"></thead>
+        <tbody id="settings-tbody"></tbody>
+      </table>
+    </div>
+    <p id="settings-empty" class="empty-state hidden">
+      No symbol rows yet. Use “Add new symbol setting” to create one, then click Edit in the modal to fill fields and Save.
+    </p>
+  </section>
+
+  <section class="card card--positions" aria-labelledby="positions-heading">
+    <div class="positions-card-head">
+      <div>
+        <h2 id="positions-heading" class="positions-card-title">Live net positions</h2>
+        <p class="positions-card-sub muted">Updates while the strategy is running (polls Fyers when connected).</p>
+      </div>
+    </div>
+    <div class="table-scroll table-scroll--positions">
+      <table class="data-table data-table--positions hidden" id="net-positions-table">
+        <thead>
+          <tr>
+            <th>TIMESTAMP</th>
+            <th>SYMBOL</th>
+            <th>REALISED P&amp;L</th>
+            <th>UNREALISED %</th>
+            <th>UNREALISED PTS</th>
+            <th class="th-actions-narrow">ACTION</th>
+          </tr>
+        </thead>
+        <tbody id="net-positions-tbody"></tbody>
+      </table>
+    </div>
+    <p class="empty-state positions-empty" id="net-positions-empty">
+      No open positions. Start the strategy and connect to Fyers to load live data.
+    </p>
+  </section>
+</div>
+
+<div
+  id="edit-modal"
+  class="modal hidden"
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby="edit-modal-title"
+  aria-hidden="true"
+>
+  <div class="modal__backdrop" id="edit-modal-backdrop" tabindex="-1"></div>
+  <div class="modal__panel">
+    <div class="modal__head">
+      <h2 id="edit-modal-title" class="modal__title">Edit symbol setting</h2>
+      <button type="button" class="modal__close" id="edit-modal-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal__body">
+      <p class="modal__hint muted" id="edit-modal-subtitle"></p>
+      <div id="edit-modal-form" class="modal-form"></div>
+    </div>
+    <div class="modal__foot">
+      <button type="button" class="btn btn--danger-outline btn--sm" id="edit-modal-delete">Delete</button>
+      <div class="modal__foot-spacer"></div>
+      <button type="button" class="btn btn--ghost btn--sm" id="edit-modal-cancel">Cancel</button>
+      <button type="button" class="btn btn--primary btn--sm" id="edit-modal-save">Save</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+{% endblock %}

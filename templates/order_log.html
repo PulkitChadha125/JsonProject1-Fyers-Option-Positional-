@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Order log · Strategy{% endblock %}
+{% block content %}
+<div class="page">
+  <header class="page-header page-header--split">
+    <div class="page-header__titles">
+      <h1 class="page-title">Order log</h1>
+      <p class="page-sub muted">Broker and strategy order events.</p>
+    </div>
+    <button type="button" class="btn btn--danger-outline btn--sm" id="order-log-clear">
+      Clear order log
+    </button>
+  </header>
+
+  <div class="log-filters card">
+    <div class="log-filters__row">
+      <label class="log-filters__label" for="order-filter-mode">View</label>
+      <select id="order-filter-mode" class="log-filters__select">
+        <option value="all">All logs</option>
+        <option value="symbol">Symbol</option>
+        <option value="today">Today</option>
+        <option value="range">Custom range</option>
+      </select>
+
+      <div id="order-filter-symbol-wrap" class="log-filters__group hidden">
+        <label class="log-filters__label" for="order-filter-symbol">Symbol</label>
+        <select id="order-filter-symbol" class="log-filters__select log-filters__select--wide"></select>
+      </div>
+
+      <div id="order-filter-range-wrap" class="log-filters__group hidden">
+        <label class="log-filters__label" for="order-filter-from">From</label>
+        <input type="date" id="order-filter-from" class="log-filters__date" />
+        <label class="log-filters__label" for="order-filter-to">To</label>
+        <input type="date" id="order-filter-to" class="log-filters__date" />
+      </div>
+
+      <button type="button" class="btn btn--ghost btn--sm" id="order-filter-apply">Apply</button>
+    </div>
+    <p class="log-filters__hint muted" id="order-filter-summary"></p>
+  </div>
+
+  <section class="card card--log">
+    <div class="log log--orders log--full" id="order-log-page" role="log" aria-live="polite"></div>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/order_log_page.js') }}"></script>
+{% endblock %}
