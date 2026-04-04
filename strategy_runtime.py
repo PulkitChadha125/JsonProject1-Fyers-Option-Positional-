@@ -7,6 +7,7 @@ import os
 import threading
 from datetime import datetime, timezone
 
+import FyresIntegration as fyers_integration
 import fyers_client
 
 _lock = threading.Lock()
@@ -31,6 +32,41 @@ def get_status() -> dict:
         }
 
 
+def _connect_fyers(store: dict) -> tuple[bool, str]:
+    """
+    Prefer CSV/env access_token + FyersModel; on failure retry automated_login
+    when CSV has FY_ID / PIN / totpkey / etc. (via FyresIntegration).
+    """
+    client_id = fyers_client.get_app_id(store)
+    if not client_id:
+        return False, "Missing client_id in FyersCredentials.csv (or FYERS_APP_ID)."
+
+    token = fyers_client.get_access_token_from_store(store)
+    if token:
+        ok, err = fyers_integration.ensure_fyers_session(client_id, token)
+        if ok:
+            return True, ""
+        if fyers_client.store_has_auto_login_fields(store):
+            tok2, login_err = fyers_integration.run_automated_login_from_store(store)
+            if tok2:
+                fyers_client.save_access_token_to_csv(tok2)
+                return fyers_integration.ensure_fyers_session(client_id, tok2)
+            return False, login_err or err or "Auto-login failed after token rejection."
+        return False, err or "Session invalid and CSV has no auto-login fields."
+
+    if fyers_client.store_has_auto_login_fields(store):
+        tok2, login_err = fyers_integration.run_automated_login_from_store(store)
+        if not tok2:
+            return False, login_err or "Automatic Fyers login failed."
+        fyers_client.save_access_token_to_csv(tok2)
+        return fyers_integration.ensure_fyers_session(client_id, tok2)
+
+    return False, (
+        "No access token: add access_token to FyersCredentials.csv, set FYERS_ACCESS_TOKEN, "
+        "or add fy_id, pin, totpkey, client_id, secret_key, redirect_uri for auto-login."
+    )
+
+
 def start_strategy() -> tuple[bool, str]:
     global _running, _connected, _last_message, _positions, _hidden_ids
     dry = os.environ.get("STRATEGY_ALLOW_DRY_RUN", "").strip() in ("1", "true", "yes")
@@ -39,7 +75,8 @@ def start_strategy() -> tuple[bool, str]:
         if _running:
             return False, "Strategy is already running."
 
-    app_id, token = fyers_client.get_credentials()
+    store = fyers_client.load_credentials_store()
+
     if dry:
         with _lock:
             _running = True
@@ -58,21 +95,29 @@ def start_strategy() -> tuple[bool, str]:
             ]
         return True, _last_message
 
-    ok, err = fyers_client.verify_session(app_id, token)
+    ok, conn_msg = _connect_fyers(store)
     if not ok:
         with _lock:
             _running = False
             _connected = False
-            _last_message = err
-        return False, err
+            _last_message = conn_msg
+        return False, _last_message
 
-    pos, perr = fyers_client.fetch_net_positions(app_id, token)
+    res = fyers_integration.get_position()
+    if not isinstance(res, dict):
+        with _lock:
+            _running = False
+            _connected = False
+            _last_message = "Invalid positions response from Fyers API."
+        return False, _last_message
+
+    rows, perr = fyers_client.parse_positions_response(res)
     with _lock:
         _running = True
         _connected = True
-        _last_message = perr or "Connected to Fyers."
+        _last_message = perr or "Connected to Fyers (fyers_apiv3)."
         _hidden_ids.clear()
-        _positions = _normalize_positions(pos)
+        _positions = _normalize_positions(rows)
 
     return True, _last_message
 
@@ -123,15 +168,29 @@ def refresh_positions() -> list[dict]:
                 p["timestamp"] = now
             return [p for p in _positions if p["id"] not in hidden]
 
-    app_id, token = fyers_client.get_credentials()
-    ok, err = fyers_client.verify_session(app_id, token)
+    ok, err = fyers_integration.verify_profile_ok()
     if not ok:
+        store = fyers_client.load_credentials_store()
+        client_id = fyers_client.get_app_id(store)
+        if fyers_client.store_has_auto_login_fields(store):
+            tok2, login_err = fyers_integration.run_automated_login_from_store(store)
+            if tok2:
+                fyers_client.save_access_token_to_csv(tok2)
+                ok, err = fyers_integration.ensure_fyers_session(client_id, tok2)
+        if not ok:
+            with _lock:
+                _connected = False
+                _last_message = err
+                return [p for p in _positions if p["id"] not in hidden]
+
+    res = fyers_integration.get_position()
+    if not isinstance(res, dict):
         with _lock:
             _connected = False
-            _last_message = err
+            _last_message = "Invalid positions response"
             return [p for p in _positions if p["id"] not in hidden]
 
-    rows, perr = fyers_client.fetch_net_positions(app_id, token)
+    rows, perr = fyers_client.parse_positions_response(res)
     fresh = _normalize_positions(rows)
     with _lock:
         _connected = True
@@ -148,4 +207,3 @@ def exit_position(position_id: str) -> tuple[bool, str]:
             return False, "Strategy is not running."
         _hidden_ids.add(position_id)
     return True, "Position hidden in dashboard. Square off in Fyers if you still hold the leg."
-

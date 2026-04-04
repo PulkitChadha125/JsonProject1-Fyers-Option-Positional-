@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 import webbrowser
@@ -117,9 +119,70 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
     session.set_token(auth_code)
     response = session.generate_token()
     access_token = response['access_token']
-    print("access_token: ",access_token)
+    print("access_token obtained (length %d)" % len(str(access_token)))
     fyers = fyersModel.FyersModel(client_id=client_id, is_async=False, token=access_token, log_path=os.getcwd())
     print(fyers.get_profile())
+
+
+def ensure_fyers_session(client_id: str, token: str) -> tuple[bool, str]:
+    """Build global FyersModel from client_id + access_token; verify with get_profile."""
+    global fyers, access_token
+    if not (client_id or "").strip() or not (token or "").strip():
+        return False, "Missing client_id or access_token"
+    try:
+        access_token = token.strip()
+        fyers = fyersModel.FyersModel(
+            client_id=client_id.strip(),
+            is_async=False,
+            token=access_token,
+            log_path=os.getcwd(),
+        )
+        prof = fyers.get_profile()
+        if isinstance(prof, dict) and prof.get("s") == "ok":
+            return True, ""
+        return False, str(prof.get("message") or prof.get("msg") or prof)[:400]
+    except Exception as e:
+        return False, str(e)
+
+
+def verify_profile_ok() -> tuple[bool, str]:
+    """Use when session already exists (e.g. refresh positions)."""
+    global fyers
+    if fyers is None:
+        return False, "Fyers client not initialized"
+    try:
+        prof = fyers.get_profile()
+        if isinstance(prof, dict) and prof.get("s") == "ok":
+            return True, ""
+        return False, str(prof.get("message") or prof.get("msg") or prof)[:400]
+    except Exception as e:
+        return False, str(e)
+
+
+def run_automated_login_from_store(store: dict) -> tuple[str | None, str]:
+    """
+    CSV keys (lowercase): fy_id, pin, totpkey, client_id, secret_key, redirect_uri.
+    On success returns (access_token, ""); updates globals fyers / access_token.
+    """
+    need = ("fy_id", "pin", "totpkey", "client_id", "secret_key", "redirect_uri")
+    missing = [k for k in need if not (store.get(k) or "").strip()]
+    if missing:
+        return None, "Missing Fyers CSV fields: " + ", ".join(missing)
+    try:
+        automated_login(
+            store["client_id"].strip(),
+            store["secret_key"].strip(),
+            store["fy_id"].strip(),
+            store["totpkey"].strip(),
+            store["pin"].strip(),
+            store["redirect_uri"].strip(),
+        )
+        tok = access_token
+        if tok:
+            return str(tok), ""
+        return None, "automated_login did not set access_token"
+    except Exception as e:
+        return None, str(e)
 
 def get_ltp(SYMBOL):
     global fyers

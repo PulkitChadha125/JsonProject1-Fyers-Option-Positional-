@@ -1,2 +1,6 @@
 Flask>=3.0.0,<4
 requests>=2.28.0,<3
+fyers-apiv3>=3.0.0,<4
+pyotp>=2.8.0,<3
+pandas>=2.0.0,<3
+pytz>=2023.3

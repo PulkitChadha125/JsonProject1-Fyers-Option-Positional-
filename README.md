@@ -50,20 +50,28 @@ pip install -r requirements.txt
 
 ## Fyers API (Start strategy)
 
-**Start strategy** checks your Fyers session and then polls **net positions** for the live table.
+**Start strategy** uses **`FyersCredentials.csv`** in the project folder (same level as `app.py`). The file should have two columns: **`Title`**, **`Value`** (see your existing rows).
 
-Set these environment variables before running the app (values come from the Fyers API dashboard after you complete their login / token flow):
+### Credentials file
 
-| Variable | Purpose |
-|----------|---------|
-| `FYERS_APP_ID` | Your Fyers app / client id (e.g. `XXXXXX-100`) |
-| `FYERS_ACCESS_TOKEN` | Valid access token for API v3 |
+| Title | Purpose |
+|-------|---------|
+| `client_id` | Fyers app id (e.g. `XXXX-100`) |
+| `secret_key` | App secret |
+| `redirect_uri` | Must match the redirect URL configured for the app |
+| `FY_ID` | Your Fyers user id |
+| `PIN` | Your PIN |
+| `totpkey` | TOTP secret for 2FA |
+| `access_token` | *(Optional)* If present, used for API calls. After a successful **automatic login**, the app **writes** this row for you. |
+| `state` | *(Optional)* OAuth state (defaults used if omitted) |
 
-Optional:
+**Automatic login:** If `access_token` is missing or the session fails, but all of `FY_ID`, `PIN`, `totpkey`, `client_id`, `secret_key`, and `redirect_uri` are set, the server runs the same style of flow as the official examples (OTP via TOTP → PIN → auth code → `validate-authcode`) and saves the new `access_token` to the CSV.
 
-| Variable | Purpose |
-|----------|---------|
-| `STRATEGY_ALLOW_DRY_RUN` | Set to `1` to start without Fyers and show a **mock** position (UI testing only). |
+**Overrides (optional):** `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN` environment variables still override `client_id` / `access_token` when set.
+
+**Security:** `FyersCredentials.csv` is listed in `.gitignore`—do not commit it.
+
+**Dry run:** Set `STRATEGY_ALLOW_DRY_RUN=1` to test the UI without Fyers.
 
 **Exit** on the net-position row only **hides** that line in the dashboard until you stop the strategy; it does **not** send a square-off order to Fyers (that can be added later).
 
