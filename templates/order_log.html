@@ -7,9 +7,16 @@
       <h1 class="page-title">Order log</h1>
       <p class="page-sub muted">Broker and strategy order events.</p>
     </div>
-    <button type="button" class="btn btn--danger-outline btn--sm" id="order-log-clear">
-      Clear order log
-    </button>
+    <div class="page-header__meta">
+      <div class="toolbar">
+        <button type="button" class="btn btn--ghost btn--sm" id="order-log-export-csv">
+          Export CSV
+        </button>
+        <button type="button" class="btn btn--danger-outline btn--sm" id="order-log-clear">
+          Clear order log
+        </button>
+      </div>
+    </div>
   </header>
 
   <div class="log-filters card">
@@ -36,12 +43,32 @@
 
       <button type="button" class="btn btn--ghost btn--sm" id="order-filter-apply">Apply</button>
     </div>
-    <p class="log-filters__hint muted" id="order-filter-summary"></p>
+    <div class="log-filters__meta">
+      <p class="log-filters__hint muted" id="order-filter-summary"></p>
+      <p class="log-filters__pnl" id="order-filter-pnl">Total P&amp;L (selected): 0.00</p>
+    </div>
   </div>
 
   <section class="card card--log">
     <div class="log log--orders log--full" id="order-log-page" role="log" aria-live="polite"></div>
   </section>
+</div>
+
+<div id="order-detail-modal" class="modal hidden" role="dialog" aria-modal="true" aria-hidden="true">
+  <div class="modal__backdrop" id="order-detail-backdrop" tabindex="-1"></div>
+  <div class="modal__panel modal__panel--log-detail">
+    <div class="modal__head">
+      <h2 class="modal__title" id="order-detail-title">Order details</h2>
+      <button type="button" class="modal__close" id="order-detail-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal__body">
+      <pre class="log-detail-pre" id="order-detail-body"></pre>
+    </div>
+    <div class="modal__foot">
+      <div class="modal__foot-spacer"></div>
+      <button type="button" class="btn btn--ghost btn--sm" id="order-detail-close-btn">Close</button>
+    </div>
+  </div>
 </div>
 {% endblock %}
 {% block scripts %}

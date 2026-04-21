@@ -199,5 +199,10 @@ def api_net_position_exit(position_id: str):
     return jsonify({"ok": ok, "message": msg, "positions": positions, **st}), status
 
 
+@app.get("/api/orders")
+def api_orders():
+    return jsonify({"orders": strategy_runtime.get_order_events()})
+
+
 if __name__ == "__main__":
     app.run(debug=True, host="127.0.0.1", port=5000)

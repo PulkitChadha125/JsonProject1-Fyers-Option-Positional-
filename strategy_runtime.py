@@ -1,4 +1,4 @@
-"""In-process strategy state, intraday breakout flow, and positions cache."""
+"""In-process strategy state, intraday breakout flow, trailing SL ladder, and order events."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import threading
 import time as time_mod
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import FyresIntegration as fyers_integration
@@ -16,6 +17,7 @@ import fyers_client
 
 IST = ZoneInfo("Asia/Kolkata")
 TRADE_CSV_PATH = Path(__file__).resolve().parent / "TradeSettings.csv"
+MAX_ORDER_EVENTS = 1500
 
 _lock = threading.Lock()
 _running = False
@@ -23,6 +25,7 @@ _connected = False
 _last_message = ""
 _positions: list[dict] = []
 _hidden_ids: set[str] = set()
+_order_events: list[dict[str, Any]] = []
 
 _engine_thread: threading.Thread | None = None
 _engine_stop = threading.Event()
@@ -38,6 +41,12 @@ def _now_ist() -> datetime:
     return datetime.now(IST)
 
 
+def _set_message(msg: str) -> None:
+    global _last_message
+    with _lock:
+        _last_message = msg
+
+
 def _position_id(symbol: str, idx: int) -> str:
     h = hashlib.sha256(f"{symbol}|{idx}".encode()).hexdigest()
     return h[:20]
@@ -46,6 +55,13 @@ def _position_id(symbol: str, idx: int) -> str:
 def _safe_int(v: str | int | float, default: int = 0) -> int:
     try:
         return int(float(str(v).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(v)
     except (TypeError, ValueError):
         return default
 
@@ -70,7 +86,6 @@ def _parse_hhmm(v: str) -> time | None:
 
 
 def _parse_expiry_code(expires_on: str) -> str:
-    """19-03-2026 -> 19MAR."""
     s = str(expires_on or "").strip()
     if not s:
         return ""
@@ -103,8 +118,37 @@ def _with_ist(ts) -> datetime | None:
     return dt.astimezone(IST)
 
 
+def _append_order_event(
+    message: str,
+    kind: str = "info",
+    symbol: str = "",
+    pnl: float | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    global _order_events
+    now = datetime.now()
+    evt = {
+        "ts": now.strftime("%H:%M:%S"),
+        "date": now.strftime("%Y-%m-%d"),
+        "iso": now.isoformat(timespec="seconds"),
+        "message": str(message),
+        "kind": kind or "info",
+        "symbol": str(symbol or "").strip(),
+        "pnl": None if pnl is None else round(_safe_float(pnl), 2),
+        "details": details or {},
+    }
+    with _lock:
+        _order_events.append(evt)
+        if len(_order_events) > MAX_ORDER_EVENTS:
+            _order_events = _order_events[-MAX_ORDER_EVENTS:]
+
+
+def get_order_events() -> list[dict[str, Any]]:
+    with _lock:
+        return list(_order_events)
+
+
 def _price_from_quotes(symbol: str) -> float | None:
-    # Prefer websocket ticks if available.
     try:
         ws_ltp = fyers_integration.shared_data_2.get(symbol)
         if ws_ltp is not None:
@@ -155,10 +199,6 @@ def _start_option_websocket_if_needed() -> None:
 
 
 def _fetch_candle_value(symbol: str, target_dt: datetime, field: str) -> float | None:
-    """
-    Return OHLC field from 15m candle that starts exactly at target_dt (IST).
-    field: one of open/high/low/close.
-    """
     try:
         df = fyers_integration.fetchOHLC(symbol, 15)
     except Exception:
@@ -185,12 +225,9 @@ def _fetch_candle_value(symbol: str, target_dt: datetime, field: str) -> float |
 
 
 def _build_option_symbol(exchange: str, base_symbol: str, expiry_code: str, strike: int, side: str) -> str:
-    """NSE + NIFTY + 19MAR + 23450 + CE/PE -> NSE:NIFTY19MAR23450CE."""
     ex = (exchange or "NSE").strip().upper()
     bs = (base_symbol or "").strip().upper()
-    if not bs:
-        return ""
-    if not expiry_code:
+    if not bs or not expiry_code:
         return ""
     return f"{ex}:{bs}{expiry_code}{int(strike)}{side.upper()}"
 
@@ -264,6 +301,7 @@ def _load_active_settings() -> tuple[list[dict], str]:
                     "processed_windows": set(),
                     "active_trigger": None,
                     "squareoff_done": False,
+                    "cum_realised": 0.0,
                 },
             }
         )
@@ -276,7 +314,6 @@ def _connect_fyers(store: dict) -> tuple[bool, str]:
     client_id = fyers_client.get_app_id(store)
     if not client_id:
         return False, "Missing client_id in FyersCredentials.csv (or FYERS_APP_ID)."
-
     token = fyers_client.get_access_token_from_store(store)
     if token:
         ok, err = fyers_integration.ensure_fyers_session(client_id, token)
@@ -289,26 +326,21 @@ def _connect_fyers(store: dict) -> tuple[bool, str]:
                 return fyers_integration.ensure_fyers_session(client_id, tok2)
             return False, login_err or err or "Auto-login failed after token rejection."
         return False, err or "Session invalid and CSV has no auto-login fields."
-
     if fyers_client.store_has_auto_login_fields(store):
         tok2, login_err = fyers_integration.run_automated_login_from_store(store)
         if not tok2:
             return False, login_err or "Automatic Fyers login failed."
         fyers_client.save_access_token_to_csv(tok2)
         return fyers_integration.ensure_fyers_session(client_id, tok2)
-
     return False, (
         "No access token: add access_token to FyersCredentials.csv, set FYERS_ACCESS_TOKEN, "
-        "or add fy_id, pin, totpkey, client_id, secret_key, redirect_uri for auto-login."
+        "or add fy_id, pin, totpkey, client_id, secret_key, redirect_uri for automatic login."
     )
 
 
 def _prepare_contracts_for_day(st: dict, now: datetime) -> None:
     s = st["state"]
-    if s["prepared"]:
-        return
-    # Prepare from 9:30 onward using the 9:15 candle open of the configured symbol.
-    if now.time() < time(9, 30):
+    if s["prepared"] or now.time() < time(9, 30):
         return
     ref_dt = datetime.combine(now.date(), time(9, 15), tzinfo=IST)
     open_px = _fetch_candle_value(st["symbol"], ref_dt, "open")
@@ -338,10 +370,13 @@ def _activate_window_if_due(st: dict, now: datetime) -> None:
         chk = datetime.combine(now.date(), tr, tzinfo=IST) + timedelta(minutes=15)
         if now < chk:
             continue
-        ce_high = _fetch_candle_value(s["ce_symbol"], datetime.combine(now.date(), tr, tzinfo=IST), "high")
-        pe_high = _fetch_candle_value(s["pe_symbol"], datetime.combine(now.date(), tr, tzinfo=IST), "high")
+        candle_dt = datetime.combine(now.date(), tr, tzinfo=IST)
+        ce_high = _fetch_candle_value(s["ce_symbol"], candle_dt, "high")
+        pe_high = _fetch_candle_value(s["pe_symbol"], candle_dt, "high")
+        ce_low = _fetch_candle_value(s["ce_symbol"], candle_dt, "low")
+        pe_low = _fetch_candle_value(s["pe_symbol"], candle_dt, "low")
         if ce_high is None or pe_high is None:
-            _log(f"Row {st['row_index']}: could not fetch highs for window {tr.strftime('%H:%M')}")
+            _log(f"Row {st['row_index']}: missing highs for window {tr.strftime('%H:%M')}.")
             s["processed_windows"].add(idx)
             return
         s["active_trigger"] = {
@@ -349,85 +384,127 @@ def _activate_window_if_due(st: dict, now: datetime) -> None:
             "window_time": tr,
             "ce_high": ce_high,
             "pe_high": pe_high,
+            "ce_low": ce_low,
+            "pe_low": pe_low,
         }
         s["processed_windows"].add(idx)
         _log(
-            f"Row {st['row_index']}: breakout armed for {tr.strftime('%H:%M')} "
-            f"(check from {chk.strftime('%H:%M')}) CEhigh={ce_high:.2f} PEhigh={pe_high:.2f}"
+            f"Row {st['row_index']}: window {tr.strftime('%H:%M')} armed. "
+            f"CE H/L {ce_high:.2f}/{_safe_float(ce_low):.2f}, PE H/L {pe_high:.2f}/{_safe_float(pe_low):.2f}"
         )
         return
 
 
-def _place_buy(symbol: str, qty: int) -> tuple[bool, str]:
+def _place_order(symbol: str, qty: int, side: int, order_type: int = 2, price: float = 0.0) -> tuple[bool, dict[str, Any]]:
+    req = {
+        "symbol": symbol,
+        "quantity": int(qty),
+        "type": int(order_type),
+        "side": int(side),
+        "price": float(price),
+    }
     try:
-        r = fyers_integration.place_order(symbol=symbol, quantity=qty, type=2, side=1, price=0)
+        r = fyers_integration.place_order(
+            symbol=req["symbol"],
+            quantity=req["quantity"],
+            type=req["type"],
+            side=req["side"],
+            price=req["price"],
+        )
     except Exception as e:
-        return False, str(e)
+        return False, {"request": req, "response": str(e), "message": str(e), "order_id": ""}
     if isinstance(r, dict) and r.get("s") == "ok":
-        return True, str(r.get("id") or "")
-    msg = ""
+        return True, {
+            "request": req,
+            "response": r,
+            "message": str(r.get("message") or r.get("msg") or "ok"),
+            "order_id": str(r.get("id") or ""),
+        }
     if isinstance(r, dict):
-        msg = str(r.get("message") or r.get("msg") or r)
-    return False, msg or "Order rejected"
+        return False, {
+            "request": req,
+            "response": r,
+            "message": str(r.get("message") or r.get("msg") or r),
+            "order_id": "",
+        }
+    return False, {"request": req, "response": r, "message": "Order rejected", "order_id": ""}
 
 
-def _place_squareoff(symbol: str, qty: int) -> tuple[bool, str]:
-    try:
-        r = fyers_integration.place_order(symbol=symbol, quantity=qty, type=2, side=-1, price=0)
-    except Exception as e:
-        return False, str(e)
-    if isinstance(r, dict) and r.get("s") == "ok":
-        return True, str(r.get("id") or "")
-    msg = ""
-    if isinstance(r, dict):
-        msg = str(r.get("message") or r.get("msg") or r)
-    return False, msg or "Square-off rejected"
+def _place_buy(symbol: str, qty: int) -> tuple[bool, dict[str, Any]]:
+    return _place_order(symbol=symbol, qty=qty, side=1, order_type=2, price=0.0)
 
 
-def _squareoff_all_open_positions() -> tuple[bool, str]:
-    """
-    Close all open net positions from broker view.
-    qty > 0 -> sell side -1
-    qty < 0 -> buy side 1
-    """
-    try:
-        res = fyers_integration.get_position()
-    except Exception as e:
-        return False, str(e)
-    if not isinstance(res, dict):
-        return False, "Invalid positions payload"
-    raw = res.get("netPositions") or []
-    if not isinstance(raw, list):
-        return False, "netPositions not found"
+def _place_squareoff(symbol: str, qty: int) -> tuple[bool, dict[str, Any]]:
+    return _place_order(symbol=symbol, qty=qty, side=-1, order_type=2, price=0.0)
 
-    closed = 0
-    errors: list[str] = []
-    for row in raw:
-        if not isinstance(row, dict):
-            continue
-        sym = str(row.get("symbol") or row.get("tradingsymbol") or "").strip()
-        if not sym:
-            continue
-        qv = row.get("qty") or row.get("netQty") or row.get("net_qty") or 0
-        try:
-            qty = int(abs(float(qv)))
-        except (TypeError, ValueError):
-            continue
-        if qty <= 0:
-            continue
-        side = -1 if float(qv) > 0 else 1
-        try:
-            rr = fyers_integration.place_order(symbol=sym, quantity=qty, type=2, side=side, price=0)
-            if isinstance(rr, dict) and rr.get("s") == "ok":
-                closed += 1
-            else:
-                errors.append(f"{sym}: {rr}")
-        except Exception as e:
-            errors.append(f"{sym}: {e}")
 
-    if errors:
-        return False, "; ".join(errors[:4])
-    return True, f"Square-off sent for {closed} position(s)."
+def _next_trigger_r(current: float) -> float:
+    if current < 1.0:
+        return 1.4
+    return round(current + 0.5, 2)
+
+
+def _trail_sl_for_trigger(entry: float, risk: float, trigger_r: float, current_sl: float) -> float:
+    if trigger_r < 1.0:
+        return max(current_sl, entry * (1.0 - 0.0245))
+    return max(current_sl, entry + risk * (trigger_r - 0.4))
+
+
+def _close_internal_position(st: dict, now: datetime, reason: str, market_price: float | None = None) -> bool:
+    s = st["state"]
+    pos = s.get("open_position")
+    if not pos:
+        return False
+    exit_price = _safe_float(market_price, pos["entry_price"])
+    ok, meta = _place_squareoff(pos["symbol"], int(pos["qty"]))
+    if not ok:
+        info = str(meta.get("message") or "Exit failed")
+        _log(f"Row {st['row_index']}: exit failed ({reason}) for {pos['symbol']}: {info}")
+        _set_message(f"Exit failed ({reason}) row {st['row_index']}: {info}")
+        _append_order_event(
+            f"EXIT FAIL ({reason}) {pos['symbol']} qty={pos['qty']} err={info}",
+            kind="warn",
+            symbol=pos["symbol"],
+            details={
+                "action": "SELL",
+                "order_type": "MARKET",
+                "reason": reason,
+                "request": meta.get("request"),
+                "response": meta.get("response"),
+                "qty": int(pos["qty"]),
+            },
+        )
+        return False
+
+    realised = (exit_price - pos["entry_price"]) * pos["qty"]
+    s["cum_realised"] = _safe_float(s.get("cum_realised"), 0.0) + realised
+    s["open_position"] = None
+    s["entry_done"] = False
+    s["active_trigger"] = None
+
+    msg = (
+        f"EXIT {reason} {pos['symbol']} qty={pos['qty']} "
+        f"entry={pos['entry_price']:.2f} exit={exit_price:.2f} realised={realised:.2f}"
+    )
+    _append_order_event(
+        f"ORDER EXIT {pos['symbol']} {reason}",
+        kind="info",
+        symbol=pos["symbol"],
+        pnl=realised,
+        details={
+            "action": "SELL",
+            "order_type": "MARKET",
+            "reason": reason,
+            "request": meta.get("request"),
+            "response": meta.get("response"),
+            "qty": int(pos["qty"]),
+            "entry_price": round(_safe_float(pos["entry_price"]), 4),
+            "exit_price": round(exit_price, 4),
+        },
+    )
+    _set_message(msg)
+    _log(msg)
+    return True
 
 
 def _check_and_enter(st: dict, now: datetime) -> None:
@@ -440,64 +517,135 @@ def _check_and_enter(st: dict, now: datetime) -> None:
     if ce_ltp is None and pe_ltp is None:
         return
 
-    chosen = ""
+    chosen_symbol = ""
+    chosen_ltp = 0.0
+    chosen_low = None
     if ce_ltp is not None and ce_ltp > trigger["ce_high"]:
-        chosen = s["ce_symbol"]
+        chosen_symbol = s["ce_symbol"]
+        chosen_ltp = ce_ltp
+        chosen_low = trigger.get("ce_low")
     elif pe_ltp is not None and pe_ltp > trigger["pe_high"]:
-        chosen = s["pe_symbol"]
-    if not chosen:
+        chosen_symbol = s["pe_symbol"]
+        chosen_ltp = pe_ltp
+        chosen_low = trigger.get("pe_low")
+    if not chosen_symbol:
         return
 
-    ok, info = _place_buy(chosen, st["quantity"])
+    ok, meta = _place_buy(chosen_symbol, st["quantity"])
     if not ok:
-        _log(f"Row {st['row_index']}: entry order failed for {chosen}: {info}")
+        err = str(meta.get("message") or "entry failed")
+        _append_order_event(
+            f"ENTRY FAIL {chosen_symbol} qty={st['quantity']} err={err}",
+            kind="warn",
+            symbol=chosen_symbol,
+            details={
+                "action": "BUY",
+                "order_type": "MARKET",
+                "request": meta.get("request"),
+                "response": meta.get("response"),
+                "qty": int(st["quantity"]),
+            },
+        )
+        _log(f"Row {st['row_index']}: entry order failed for {chosen_symbol}: {err}")
         return
+
+    entry = max(0.01, _safe_float(chosen_ltp, 0.01))
+    stop = _safe_float(chosen_low, 0.0)
+    if stop <= 0 or stop >= entry:
+        stop = entry * (1.0 - 0.0245)
+    risk = entry - stop
+    if risk <= 0:
+        stop = entry * (1.0 - 0.0245)
+        risk = max(0.01, entry - stop)
+
     s["entry_done"] = True
     s["open_position"] = {
-        "symbol": chosen,
+        "symbol": chosen_symbol,
         "qty": st["quantity"],
         "entered_at": now,
         "window_time": trigger["window_time"].strftime("%H:%M"),
-        "order_id": info,
+        "entry_price": entry,
+        "stop_price": stop,
+        "risk": risk,
+        "next_trigger_r": 0.9,
+        "target_price": entry + risk * 0.9,
+        "highest_price": entry,
+        "order_id": str(meta.get("order_id") or ""),
     }
-    _set_message(
-        f"Row {st['row_index']} entry: {chosen} breakout at {now.strftime('%H:%M:%S')} "
-        f"(window {s['open_position']['window_time']})."
+
+    emsg = (
+        f"ENTRY {chosen_symbol} qty={st['quantity']} @ {entry:.2f} "
+        f"SL={stop:.2f} target(1:0.9)={entry + risk * 0.9:.2f}"
     )
-    _log(_last_message)
+    _append_order_event(
+        emsg,
+        kind="info",
+        symbol=chosen_symbol,
+        details={
+            "action": "BUY",
+            "order_type": "MARKET",
+            "request": meta.get("request"),
+            "response": meta.get("response"),
+            "qty": int(st["quantity"]),
+            "entry_price": round(entry, 4),
+            "initial_stop_price": round(stop, 4),
+            "initial_target_price": round(entry + risk * 0.9, 4),
+        },
+    )
+    _set_message(emsg)
+    _log(emsg)
 
 
-def _check_manual_close(st: dict) -> None:
+def _manage_open_position(st: dict, now: datetime) -> None:
     s = st["state"]
     pos = s.get("open_position")
     if not pos:
         return
-    try:
-        res = fyers_integration.get_position()
-    except Exception:
+
+    ltp = _price_from_quotes(pos["symbol"])
+    if ltp is None:
         return
-    if not isinstance(res, dict):
+    pos["highest_price"] = max(_safe_float(pos.get("highest_price")), ltp)
+
+    if ltp <= _safe_float(pos["stop_price"]):
+        _close_internal_position(st, now, "SL_HIT", market_price=ltp)
         return
-    raw = res.get("netPositions") or []
-    still_open = False
-    for row in raw if isinstance(raw, list) else []:
-        if not isinstance(row, dict):
-            continue
-        sym = str(row.get("symbol") or row.get("tradingsymbol") or "")
-        if sym != pos["symbol"]:
-            continue
-        qty = row.get("qty") or row.get("netQty") or row.get("net_qty") or 0
-        try:
-            if abs(float(qty)) > 0:
-                still_open = True
-                break
-        except (TypeError, ValueError):
-            continue
-    if not still_open:
-        _log(f"Row {st['row_index']}: detected external/manual close for {pos['symbol']}.")
-        s["open_position"] = None
-        s["entry_done"] = False
-        s["active_trigger"] = None
+
+    entry = _safe_float(pos["entry_price"])
+    risk = max(0.01, _safe_float(pos["risk"], 0.01))
+    trigger_r = _safe_float(pos["next_trigger_r"], 0.9)
+
+    while ltp >= entry + risk * trigger_r:
+        new_sl = _trail_sl_for_trigger(entry, risk, trigger_r, _safe_float(pos["stop_price"]))
+        pos["stop_price"] = new_sl
+        if trigger_r < 1.0:
+            next_r = 1.5
+        else:
+            next_r = trigger_r + 0.5
+        pos["target_price"] = entry + risk * next_r
+        pos["next_trigger_r"] = _next_trigger_r(trigger_r)
+
+        tmsg = (
+            f"TRAIL {pos['symbol']} hit 1:{trigger_r:.1f} -> "
+            f"SL={new_sl:.2f}, next target 1:{next_r:.1f}"
+        )
+        _append_order_event(
+            f"ORDER TRAIL {pos['symbol']}",
+            kind="info",
+            symbol=pos["symbol"],
+            details={
+                "action": "HOLD",
+                "order_type": "TRAIL",
+                "qty": int(pos["qty"]),
+                "reason": f"target_1:{trigger_r:.1f}_hit",
+                "entry_price": round(entry, 4),
+                "new_stop_price": round(new_sl, 4),
+                "next_target_price": round(_safe_float(pos["target_price"]), 4),
+            },
+        )
+        _set_message(tmsg)
+        _log(tmsg)
+        trigger_r = _safe_float(pos["next_trigger_r"])
 
 
 def _squareoff_due(st: dict, now: datetime) -> None:
@@ -505,17 +653,13 @@ def _squareoff_due(st: dict, now: datetime) -> None:
     sq = st["squareoff_time"]
     if now.time() < sq or s.get("squareoff_done"):
         return
-    ok, info = _squareoff_all_open_positions()
     s["squareoff_done"] = True
-    if ok:
-        _log(f"Row {st['row_index']}: {info} at {now.strftime('%H:%M:%S')}.")
-        _set_message(f"Square-off executed at {sq.strftime('%H:%M')}. {info}")
-        s["open_position"] = None
-        s["entry_done"] = False
-        s["active_trigger"] = None
-    else:
-        _log(f"Row {st['row_index']}: square-off failed for {pos['symbol']}: {info}")
-        _set_message(f"Square-off failed for row {st['row_index']}: {info}")
+    pos = s.get("open_position")
+    if not pos:
+        _log(f"Row {st['row_index']}: no open position at square-off {sq.strftime('%H:%M')}.")
+        return
+    ltp = _price_from_quotes(pos["symbol"])
+    _close_internal_position(st, now, "SQUAREOFF_TIME", market_price=ltp)
 
 
 def _reset_state_for_new_day(st: dict, d: date) -> None:
@@ -531,6 +675,7 @@ def _reset_state_for_new_day(st: dict, d: date) -> None:
     s["processed_windows"] = set()
     s["active_trigger"] = None
     s["squareoff_done"] = False
+    s["cum_realised"] = 0.0
 
 
 def _engine_loop() -> None:
@@ -543,9 +688,9 @@ def _engine_loop() -> None:
             _prepare_contracts_for_day(st, now)
         _start_option_websocket_if_needed()
         for st in _setting_states:
-            _check_manual_close(st)
             _activate_window_if_due(st, now)
             _check_and_enter(st, now)
+            _manage_open_position(st, now)
             _squareoff_due(st, now)
         with _lock:
             _connected = True
@@ -553,31 +698,19 @@ def _engine_loop() -> None:
     _log("Engine loop stopped.")
 
 
-def _set_message(msg: str) -> None:
-    global _last_message
-    with _lock:
-        _last_message = msg
-
-
 def get_status() -> dict:
     with _lock:
-        return {
-            "running": _running,
-            "connected": _connected,
-            "message": _last_message,
-        }
+        return {"running": _running, "connected": _connected, "message": _last_message}
 
 
 def start_strategy() -> tuple[bool, str]:
     global _running, _connected, _last_message, _positions, _hidden_ids, _engine_thread, _setting_states
     dry = os.environ.get("STRATEGY_ALLOW_DRY_RUN", "").strip() in ("1", "true", "yes")
-
     with _lock:
         if _running:
             return False, "Strategy is already running."
 
     store = fyers_client.load_credentials_store()
-
     if dry:
         with _lock:
             _running = True
@@ -617,38 +750,18 @@ def start_strategy() -> tuple[bool, str]:
     _engine_thread = threading.Thread(target=_engine_loop, name="strategy-engine", daemon=True)
     _engine_thread.start()
 
-    res = fyers_integration.get_position()
-    rows, perr = fyers_client.parse_positions_response(res if isinstance(res, dict) else {})
     with _lock:
         _running = True
         _connected = True
         _last_message = (
-            perr
-            or f"Strategy running for {len(_setting_states)} setting(s). "
-            "Waiting for TimeRage windows and square-off at SqaureoffTime."
+            f"Strategy running for {len(_setting_states)} setting(s). "
+            "Trailing SL active; square-off at SqaureoffTime."
         )
         _hidden_ids.clear()
-        _positions = _normalize_positions(rows)
+        _positions = []
+    _append_order_event("Strategy started.", kind="info")
     _log(_last_message)
     return True, _last_message
-
-
-def _normalize_positions(rows: list[dict]) -> list[dict]:
-    out = []
-    for i, r in enumerate(rows):
-        sym = str(r.get("symbolname", ""))
-        pid = _position_id(sym, int(r.get("_source_index", i)))
-        out.append(
-            {
-                "id": pid,
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "symbolname": sym,
-                "realisedpnl": r.get("realisedpnl", 0),
-                "unrealisedpnl_pct": r.get("unrealisedpnl_pct", "—"),
-                "unrealisedpnl_pts": r.get("unrealisedpnl_pts", 0),
-            }
-        )
-    return out
 
 
 def stop_strategy() -> tuple[bool, str]:
@@ -664,14 +777,13 @@ def stop_strategy() -> tuple[bool, str]:
         _last_message = "Strategy stopped."
         _positions = []
         _hidden_ids.clear()
+    _append_order_event("Strategy stopped.", kind="info")
     return True, "Strategy stopped."
 
 
 def refresh_positions() -> list[dict]:
-    """Call while running to pull latest from Fyers (or keep dry-run list)."""
-    global _positions, _last_message, _connected
+    global _positions
     dry = os.environ.get("STRATEGY_ALLOW_DRY_RUN", "").strip() in ("1", "true", "yes")
-
     with _lock:
         if not _running:
             return []
@@ -684,40 +796,40 @@ def refresh_positions() -> list[dict]:
                 p["timestamp"] = now
             return [p for p in _positions if p["id"] not in hidden]
 
-    ok, err = fyers_integration.verify_profile_ok()
-    if not ok:
-        store = fyers_client.load_credentials_store()
-        client_id = fyers_client.get_app_id(store)
-        if fyers_client.store_has_auto_login_fields(store):
-            tok2, _login_err = fyers_integration.run_automated_login_from_store(store)
-            if tok2:
-                fyers_client.save_access_token_to_csv(tok2)
-                ok, err = fyers_integration.ensure_fyers_session(client_id, tok2)
-        if not ok:
-            with _lock:
-                _connected = False
-                _last_message = err
-                return [p for p in _positions if p["id"] not in hidden]
+    out: list[dict] = []
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    for st in _setting_states:
+        s = st["state"]
+        pos = s.get("open_position")
+        if not pos:
+            continue
+        sym = pos["symbol"]
+        pid = _position_id(sym, st["row_index"])
+        if pid in hidden:
+            continue
+        ltp = _price_from_quotes(sym)
+        entry = _safe_float(pos["entry_price"])
+        qty = int(pos["qty"])
+        unreal = 0.0 if ltp is None else (ltp - entry) * qty
+        invested = abs(entry * qty) if entry and qty else 0.0
+        unreal_pct = f"{(unreal / invested * 100):.2f}%" if invested > 0 else "—"
+        out.append(
+            {
+                "id": pid,
+                "timestamp": now_utc,
+                "symbolname": sym,
+                "realisedpnl": round(_safe_float(s.get("cum_realised")), 2),
+                "unrealisedpnl_pct": unreal_pct,
+                "unrealisedpnl_pts": round(unreal, 2),
+            }
+        )
 
-    res = fyers_integration.get_position()
-    if not isinstance(res, dict):
-        with _lock:
-            _connected = False
-            _last_message = "Invalid positions response"
-            return [p for p in _positions if p["id"] not in hidden]
-
-    rows, perr = fyers_client.parse_positions_response(res)
-    fresh = _normalize_positions(rows)
     with _lock:
-        _connected = True
-        if perr:
-            _last_message = perr
-        _positions = fresh
-        return [p for p in _positions if p["id"] not in hidden]
+        _positions = out
+        return [p for p in out if p["id"] not in hidden]
 
 
 def exit_position(position_id: str) -> tuple[bool, str]:
-    """Hide position in UI until strategy stops. Does not place a broker square-off order."""
     with _lock:
         if not _running:
             return False, "Strategy is not running."
