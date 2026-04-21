@@ -31,6 +31,8 @@ _engine_thread: threading.Thread | None = None
 _engine_stop = threading.Event()
 _setting_states: list[dict] = []
 _ws_thread: threading.Thread | None = None
+_ws_last_signature: str = ""
+_ws_retry_after_monotonic: float = 0.0
 
 
 def _log(msg: str) -> None:
@@ -85,14 +87,16 @@ def _parse_hhmm(v: str) -> time | None:
     return time(hour=hh, minute=mm)
 
 
-def _parse_expiry_code(expires_on: str) -> str:
+def _parse_expiry_code(expires_on: str, exp_type: str = "") -> str:
     s = str(expires_on or "").strip()
     if not s:
         return ""
+    _ = str(exp_type or "").strip().upper()
     for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
         try:
             d = datetime.strptime(s, fmt).date()
-            return d.strftime("%d%b").upper()
+            # Example: 28-04-2026 -> 26APR (format seen in Fyers search).
+            return d.strftime("%y%b").upper()
         except ValueError:
             continue
     return ""
@@ -102,6 +106,20 @@ def _round_to_step(px: float, step: int) -> int:
     if step <= 0:
         step = 50
     return int(round(px / step) * step)
+
+
+def _is_market_closed_for_row(now_ist: datetime, squareoff_time: time) -> bool:
+    """
+    Market-closed window requested by user:
+    if time is greater than square-off time and less than 09:15 (next session open),
+    strategy start should be blocked.
+    """
+    t = now_ist.time()
+    return t > squareoff_time or t < time(9, 15)
+
+
+def _is_market_open_for_row(now_ist: datetime, squareoff_time: time) -> bool:
+    return not _is_market_closed_for_row(now_ist, squareoff_time)
 
 
 def _with_ist(ts) -> datetime | None:
@@ -174,7 +192,7 @@ def _price_from_quotes(symbol: str) -> float | None:
 
 
 def _start_option_websocket_if_needed() -> None:
-    global _ws_thread
+    global _ws_thread, _ws_last_signature, _ws_retry_after_monotonic
     if _ws_thread and _ws_thread.is_alive():
         return
     symbols: set[str] = set()
@@ -188,7 +206,19 @@ def _start_option_websocket_if_needed() -> None:
     if not symbols:
         return
     sym_list = sorted(symbols)
+    signature = "|".join(sym_list)
+    now_mono = time_mod.monotonic()
+    # Prevent tight reconnect loops when symbols are invalid/rejected.
+    if signature == _ws_last_signature and now_mono < _ws_retry_after_monotonic:
+        return
+    _ws_last_signature = signature
+    _ws_retry_after_monotonic = now_mono + 30.0
     _log(f"Starting options websocket for {len(sym_list)} symbols.")
+    _set_message(
+        "Subscribing option symbols on websocket: "
+        + ", ".join(sym_list[:2])
+        + ("..." if len(sym_list) > 2 else "")
+    )
     _ws_thread = threading.Thread(
         target=fyers_integration.fyres_websocket_option,
         args=(sym_list,),
@@ -272,7 +302,8 @@ def _load_active_settings() -> tuple[list[dict], str]:
         t2 = _parse_hhmm(val("TIMERAGE2"))
         t3 = _parse_hhmm(val("TIMERAGE3"))
         ranges = [x for x in (t1, t2, t3) if x is not None]
-        expiry_code = _parse_expiry_code(val("EXPIERYDATE"))
+        exp_type = val("EXPTYPE")
+        expiry_code = _parse_expiry_code(val("EXPIERYDATE"), exp_type)
         if not sym or not base or qty <= 0 or not ranges or not expiry_code:
             continue
 
@@ -306,7 +337,10 @@ def _load_active_settings() -> tuple[list[dict], str]:
             }
         )
     if not out:
-        return [], "No TRADINGENABLED=TRUE rows found in TradeSettings.csv."
+        return [], (
+            "No active settings: set TRADINGENABLED=TRUE for at least one row in TradeSettings.csv "
+            "and click Load set before Start strategy."
+        )
     return out, ""
 
 
@@ -684,10 +718,14 @@ def _engine_loop() -> None:
     while not _engine_stop.is_set():
         now = _now_ist()
         for st in _setting_states:
+            if not _is_market_open_for_row(now, st["squareoff_time"]):
+                continue
             _reset_state_for_new_day(st, now.date())
             _prepare_contracts_for_day(st, now)
         _start_option_websocket_if_needed()
         for st in _setting_states:
+            if not _is_market_open_for_row(now, st["squareoff_time"]):
+                continue
             _activate_window_if_due(st, now)
             _check_and_enter(st, now)
             _manage_open_position(st, now)
@@ -745,6 +783,9 @@ def start_strategy() -> tuple[bool, str]:
             _last_message = err or "No active trade settings found."
         return False, _last_message
 
+    now_ist = _now_ist()
+    waiting_for_market_open = all(_is_market_closed_for_row(now_ist, st["squareoff_time"]) for st in settings)
+
     _setting_states = settings
     _engine_stop.clear()
     _engine_thread = threading.Thread(target=_engine_loop, name="strategy-engine", daemon=True)
@@ -754,8 +795,12 @@ def start_strategy() -> tuple[bool, str]:
         _running = True
         _connected = True
         _last_message = (
-            f"Strategy running for {len(_setting_states)} setting(s). "
-            "Trailing SL active; square-off at SqaureoffTime."
+            "Waiting for market to open (09:15 IST to SqaureoffTime)."
+            if waiting_for_market_open
+            else (
+                f"Strategy running for {len(_setting_states)} setting(s). "
+                "Trailing SL active; square-off at SqaureoffTime."
+            )
         )
         _hidden_ids.clear()
         _positions = []

@@ -19,6 +19,38 @@ fyers=None
 shared_data = {}
 shared_data_2 = {}
 # Lock to ensure thread-safe access to the shared data
+
+
+def _redact_for_log(obj):
+    """Best-effort redaction for sensitive auth payloads before printing."""
+    try:
+        if isinstance(obj, dict):
+            out = {}
+            for k, v in obj.items():
+                lk = str(k).lower().replace("-", "_")
+                if lk in (
+                    "access_token",
+                    "refresh_token",
+                    "request_key",
+                    "auth_code",
+                    "code",
+                    "pin",
+                    "otp",
+                    "identifier",
+                    "cookie",
+                    "details",
+                ):
+                    out[k] = "***"
+                elif isinstance(v, (dict, list)):
+                    out[k] = _redact_for_log(v)
+                else:
+                    out[k] = v
+            return out
+        if isinstance(obj, list):
+            return [_redact_for_log(x) for x in obj[:20]]
+    except Exception:
+        pass
+    return obj
 def apiactivation(client_id, redirect_uri, response_type, state, secret_key, grant_type):
     from fyers_apiv3 import fyersModel
     import webbrowser
@@ -74,20 +106,23 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
     URL_SEND_LOGIN_OTP = "https://api-t2.fyers.in/vagator/v2/send_login_otp_v2"
     response = requests.post(url=URL_SEND_LOGIN_OTP, json={"fy_id": getEncodedString(FY_ID), "app_id": "2"})
     print("Status code:", response.status_code)
-    print("Raw text:", response.text)
+    try:
+        print("OTP step response:", _redact_for_log(response.json()))
+    except Exception:
+        print("OTP step response: <non-json>")
     res = response.json()
 
     if datetime.now().second % 30 > 27: sleep(5)
     URL_VERIFY_OTP = "https://api-t2.fyers.in/vagator/v2/verify_otp"
     res2 = requests.post(url=URL_VERIFY_OTP,
                          json={"request_key": res["request_key"], "otp": pyotp.TOTP(TOTP_KEY).now()}).json()
-    print(res2)
+    print("verify_otp:", _redact_for_log(res2))
 
     ses = requests.Session()
     URL_VERIFY_OTP2 = "https://api-t2.fyers.in/vagator/v2/verify_pin_v2"
     payload2 = {"request_key": res2["request_key"], "identity_type": "pin", "identifier": getEncodedString(PIN)}
     res3 = ses.post(url=URL_VERIFY_OTP2, json=payload2).json()
-    print("res3: ",res3)
+    print("verify_pin_v2:", _redact_for_log(res3))
 
     ses.headers.update({
         'authorization': f"Bearer {res3['data']['access_token']}"
@@ -101,7 +136,7 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
                 "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
 
     res3 = ses.post(url=TOKENURL, json=payload3).json()
-    print("res3: ",res3)
+    print("token redirect response:", _redact_for_log(res3))
     url = res3['Url']
     parsed = urlparse(url)
     auth_code = parse_qs(parsed.query)['auth_code'][0]
@@ -121,7 +156,11 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
     access_token = response['access_token']
     print("access_token obtained (length %d)" % len(str(access_token)))
     fyers = fyersModel.FyersModel(client_id=client_id, is_async=False, token=access_token, log_path=os.getcwd())
-    print(fyers.get_profile())
+    prof = fyers.get_profile()
+    if isinstance(prof, dict):
+        print("profile status:", {"s": prof.get("s"), "code": prof.get("code"), "message": prof.get("message")})
+    else:
+        print("profile status: <unknown>")
 
 
 def ensure_fyers_session(client_id: str, token: str) -> tuple[bool, str]:

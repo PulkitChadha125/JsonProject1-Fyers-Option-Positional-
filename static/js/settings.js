@@ -58,6 +58,37 @@
     return v === "TRUE" || v === "1" || v === "YES" || v === "ON";
   }
 
+  function isExpTypeColumn(name) {
+    var n = normalizeHeaderName(name);
+    return n === "exptype";
+  }
+
+  function isExpiryDateColumn(name) {
+    var n = normalizeHeaderName(name);
+    return n === "expierydate" || n === "expirydate";
+  }
+
+  function toDateInputValue(raw) {
+    var s = String(raw || "").trim();
+    if (!s) return "";
+    var m;
+    m = s.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    if (m) return m[3] + "-" + m[2] + "-" + m[1];
+    m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (m) return m[3] + "-" + m[2] + "-" + m[1];
+    m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) return s;
+    return "";
+  }
+
+  function fromDateInputValue(raw) {
+    var s = String(raw || "").trim();
+    if (!s) return "";
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return s;
+    return m[3] + "-" + m[2] + "-" + m[1];
+  }
+
   function toTimeInputValue(raw) {
     var s = String(raw || "").trim();
     if (!s) return "";
@@ -178,6 +209,28 @@
         input.className = "modal-input";
         input.id = "mf-" + ci;
         input.value = toTimeInputValue(draftRow[ci]);
+      } else if (isExpTypeColumn(headers[ci])) {
+        input = document.createElement("select");
+        input.className = "modal-input";
+        input.id = "mf-" + ci;
+        var optBlank = document.createElement("option");
+        optBlank.value = "";
+        optBlank.textContent = "Select ExpType";
+        input.appendChild(optBlank);
+        ["WEEKLY", "MONTHLY"].forEach(function (v) {
+          var opt = document.createElement("option");
+          opt.value = v;
+          opt.textContent = v;
+          input.appendChild(opt);
+        });
+        var current = draftRow[ci] != null ? String(draftRow[ci]).trim().toUpperCase() : "";
+        input.value = current === "WEEKLY" || current === "MONTHLY" ? current : "";
+      } else if (isExpiryDateColumn(headers[ci])) {
+        input = document.createElement("input");
+        input.type = "date";
+        input.className = "modal-input";
+        input.id = "mf-" + ci;
+        input.value = toDateInputValue(draftRow[ci]);
       } else {
         input = document.createElement("input");
         input.type = "text";
@@ -199,7 +252,13 @@
       var ci = parseInt(el.getAttribute("data-col-index"), 10);
       if (isNaN(ci) || ci < 0 || ci >= headers.length) return;
       if (ci === tradingIndex) return;
-      draftRow[ci] = el.type === "time" ? el.value || "" : el.value;
+      if (el.type === "time") {
+        draftRow[ci] = el.value || "";
+      } else if (el.type === "date" && isExpiryDateColumn(headers[ci])) {
+        draftRow[ci] = fromDateInputValue(el.value || "");
+      } else {
+        draftRow[ci] = el.value;
+      }
     });
     var tbtn = modalForm.querySelector(".modal-trade-toggle");
     if (tbtn && tradingIndex >= 0 && tradingIndex < draftRow.length) {
