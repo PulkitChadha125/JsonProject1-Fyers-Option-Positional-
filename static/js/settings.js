@@ -38,11 +38,17 @@
     if (window.Dashboard && Dashboard.toast) Dashboard.toast(msg, isErr);
   }
 
-  function isTimeColumn(name) {
-    var n = String(name || "")
+  function normalizeHeaderName(name) {
+    return String(name || "")
       .trim()
-      .toLowerCase();
-    return n === "starttime" || n === "stoptime";
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+  }
+
+  function isTimeColumn(name) {
+    var n = normalizeHeaderName(name);
+    // Supports StartTime/StopTime and variants like TimeRage1/TimeRange2.
+    return n.indexOf("time") !== -1;
   }
 
   function parseTrading(val) {
@@ -74,12 +80,12 @@
 
   function headerLabel(h, idx, hdrs) {
     var name = String(h).trim();
-    var lower = name.toLowerCase();
+    var lower = normalizeHeaderName(name);
     var dup = 0;
     for (var j = 0; j <= idx; j++) {
-      if (String(hdrs[j]).trim().toLowerCase() === lower) dup++;
+      if (normalizeHeaderName(hdrs[j]) === lower) dup++;
     }
-    if (dup > 1 && lower === "starttime") return "Start time (" + dup + ")";
+    if (dup > 1) return (name || "Column " + (idx + 1)) + " (" + dup + ")";
     return name || "Column " + (idx + 1);
   }
 

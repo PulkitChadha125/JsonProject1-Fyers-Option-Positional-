@@ -1,36 +1,59 @@
 # Trading strategy dashboard
 
-A small **Flask** web app for editing per-symbol trade settings stored in **`TradeSettings.csv`**. The UI uses a dark, Binance-style palette (black/charcoal surfaces, yellow accents, compact inputs).
+A Flask dashboard for:
 
-Navigation is a **left sidebar** with separate pages: **Symbol settings**, **Net position**, **Order log**, and **App log**.
+- managing trade settings from `TradeSettings.csv`
+- starting/stopping an intraday breakout strategy with Fyers
+- monitoring live net positions
+- viewing order/app logs
+
+UI is dark (black/charcoal + yellow accents) and mobile-friendly with a collapsible sidebar.
 
 ## Features
 
 ### Symbol settings (`/`)
 
-- Settings appear as a **scrollable table** with one row per CSV record.
-- **View mode** (default): cells are read-only text. The **`TRADINGENABLED`** column shows a True/False badge; the **Trading** column has a circular **toggle** (play-style) that updates the CSV immediately via the API.
-- **Edit** (pencil): opens the modal with one field per CSV column. Any column named **`StartTime`** or **`StopTime`** uses a time picker. If the CSV has two `StartTime` headers, the second is labeled **Start time (2)**.
-- **Save** writes the row to `TradeSettings.csv`; **Cancel** discards edits for that row.
-- **Delete** (trash) removes the row after confirmation.
-- **Add new setting** appends a blank row and opens it in edit mode (default `TRADINGENABLED` is `FALSE`).
+- CSV-backed settings table with sticky key columns (`SYMBOL`, `TRADING`, `ACTIONS`) on desktop.
+- Schema-driven UI: columns are rendered directly from `TradeSettings.csv` headers.
+- `TRADINGENABLED` toggle updates CSV immediately via API.
+- Edit modal for full row update.
+- Time-friendly modal inputs for any header containing `time` (for example: `TimeRage1`, `TimeRage2`, `TimeRage3`, `SqaureoffTime`).
+- Add/delete row support.
 
-### Other pages
+### Strategy controls (`/`)
 
-- **Net position** (`/net-position`): placeholder until a strategy engine feeds live data.
-- **Order log** (`/order-log`): stored in **localStorage**; symbol settings actions are recorded with the row’s **Symbol**. Filters: **All logs**, **Symbol** (dropdown), **Today**, **Custom range** (date from/to). **Clear order log** wipes stored entries for this browser.
-- **App log** (`/app-log`): dashboard activity in **localStorage**. **Clear app log** removes all entries for this browser.
+- Start/Stop strategy buttons with live status badge.
+- Start initializes Fyers session, loads enabled settings, and starts the runtime loop.
+- Runtime follows configured `TimeRage*` windows and enforces square-off at `SqaureoffTime`.
+
+### Live net positions
+
+- Polled while strategy is running.
+- Displays timestamp, symbol, realised P&L, unrealised %, unrealised points.
+- Exit button currently hides the row in dashboard view.
+
+### Logs
+
+- Order log (`/order-log`): localStorage-backed with filters (all/symbol/today/custom range).
+- App log (`/app-log`): localStorage-backed activity log.
+- Clear actions for both logs.
 
 ## Requirements
 
-- Python 3.10+ (recommended; the code uses modern `list[str]` typing).
-- Dependencies are listed in `requirements.txt` (Flask 3.x).
+- Python 3.10+
+- Dependencies in `requirements.txt`:
+  - Flask
+  - requests
+  - fyers-apiv3
+  - pyotp
+  - pandas
+  - pytz
 
 ## Setup
 
-Create a virtual environment, install packages, then run the app from the project root (the folder that contains `app.py` and `TradeSettings.csv`).
+Run from project root (folder containing `app.py` and `TradeSettings.csv`).
 
-**Windows (PowerShell):**
+### Windows (PowerShell)
 
 ```powershell
 cd "d:\Desktop\python projects\JsonProject1"
@@ -39,7 +62,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-**macOS / Linux:**
+### macOS / Linux
 
 ```bash
 cd /path/to/JsonProject1
@@ -48,32 +71,48 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Fyers API (Start strategy)
+## Fyers credentials (`FyersCredentials.csv`)
 
-**Start strategy** uses **`FyersCredentials.csv`** in the project folder (same level as `app.py`). The file should have two columns: **`Title`**, **`Value`** (see your existing rows).
+Expected two columns: `Title,Value`.
 
-### Credentials file
+Required for auto-login flow:
 
-| Title | Purpose |
-|-------|---------|
-| `client_id` | Fyers app id (e.g. `XXXX-100`) |
-| `secret_key` | App secret |
-| `redirect_uri` | Must match the redirect URL configured for the app |
-| `FY_ID` | Your Fyers user id |
-| `PIN` | Your PIN |
-| `totpkey` | TOTP secret for 2FA |
-| `access_token` | *(Optional)* If present, used for API calls. After a successful **automatic login**, the app **writes** this row for you. |
-| `state` | *(Optional)* OAuth state (defaults used if omitted) |
+- `client_id`
+- `secret_key`
+- `redirect_uri`
+- `FY_ID`
+- `PIN`
+- `totpkey`
 
-**Automatic login:** If `access_token` is missing or the session fails, but all of `FY_ID`, `PIN`, `totpkey`, `client_id`, `secret_key`, and `redirect_uri` are set, the server runs the same style of flow as the official examples (OTP via TOTP → PIN → auth code → `validate-authcode`) and saves the new `access_token` to the CSV.
+Optional:
 
-**Overrides (optional):** `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN` environment variables still override `client_id` / `access_token` when set.
+- `access_token` (reused if valid; refreshed and written back when auto-login succeeds)
+- `state`
 
-**Security:** `FyersCredentials.csv` is listed in `.gitignore`—do not commit it.
+Environment overrides (optional):
 
-**Dry run:** Set `STRATEGY_ALLOW_DRY_RUN=1` to test the UI without Fyers.
+- `FYERS_APP_ID`
+- `FYERS_ACCESS_TOKEN`
 
-**Exit** on the net-position row only **hides** that line in the dashboard until you stop the strategy; it does **not** send a square-off order to Fyers (that can be added later).
+Security note: `FyersCredentials.csv` is ignored in `.gitignore` and should never be committed.
+
+## Strategy runtime flow (implemented)
+
+When strategy is started and at least one row has `TRADINGENABLED=TRUE`:
+
+1. Login/verify Fyers session.
+2. Load active rows from `TradeSettings.csv`.
+3. For each active row (per day):
+   - from 9:30 onward, read 9:15 candle open of `Symbol` on 15m timeframe,
+   - round to nearest `StrikeStep`,
+   - construct CE/PE option symbols using `BaseSymbol` + `ExpieryDate` + rounded strike,
+   - subscribe option symbols to websocket,
+   - at each `TimeRage` + 15 minutes, mark CE/PE candle highs,
+   - take buy entry on first breakout (one active position per setting at a time),
+   - detect manual close and allow later windows if position is no longer open,
+   - at `SqaureoffTime`, square off all open broker positions.
+
+Current scope intentionally does not include full target/TSL implementation yet.
 
 ## Run
 
@@ -81,56 +120,85 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Open [http://127.0.0.1:5000](http://127.0.0.1:5000) in your browser.
+Open <http://127.0.0.1:5000>.
 
-Use the sidebar to open [http://127.0.0.1:5000/net-position](http://127.0.0.1:5000/net-position), [http://127.0.0.1:5000/order-log](http://127.0.0.1:5000/order-log), and [http://127.0.0.1:5000/app-log](http://127.0.0.1:5000/app-log).
+Other pages:
 
-The dev server runs with `debug=True` on `127.0.0.1:5000` as defined in `app.py`. For production, use a proper WSGI server and turn off debug mode.
+- <http://127.0.0.1:5000/net-position>
+- <http://127.0.0.1:5000/order-log>
+- <http://127.0.0.1:5000/app-log>
 
-## Data file: `TradeSettings.csv`
+## Environment flags
 
-- The first row is the **header**. All data rows must have the same number of columns as the header (the app pads or trims when reading).
-- A column named **`TRADINGENABLED`** (case-insensitive) is required for the trading toggle. Values are normalized to `TRUE` or `FALSE`.
-- Completely empty lines after the header are ignored.
+- `STRATEGY_ALLOW_DRY_RUN=1`: runs mock mode for UI validation without real broker actions.
 
-Example header (your file may differ):
+## `TradeSettings.csv` notes
 
-`Symbol`, `BaseSymbol`, `Quantity`, `StrikeRange`, `StrikeStep`, `StartTime`, `Target`, `StopLoss`, `ExpieryDate`, `ExpType`, `TradeType`, `TRADINGENABLED` (add or remove columns by editing the header row; use **Load set** to refresh the UI.)
+- Header is dynamic; UI and API follow whatever columns are present.
+- `TRADINGENABLED` column is required for strategy activation toggle.
+- Empty trailing lines are ignored.
+- Current expected strategy columns include:
+  - `Symbol`
+  - `BaseSymbol`
+  - `Quantity`
+  - `StrikeStep`
+  - `TimeRage1`
+  - `TimeRage2`
+  - `TimeRage3`
+  - `SqaureoffTime`
+  - `Target`
+  - `StopLoss`
+  - `ExpieryDate`
+  - `ExpType`
+  - `TRADINGENABLED`
 
 ## HTTP API
 
-All API routes return JSON unless noted.
+All endpoints return JSON.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/settings` | Returns `{ "headers": [...], "rows": [[...], ...] }`. |
-| `POST` | `/api/settings` | Optional body `{ "values": [...] }`. Appends a row; omit `values` for an empty row. |
-| `PUT` | `/api/settings/<index>` | Body `{ "values": [...] }`. Replaces row at zero-based `index`. |
-| `PATCH` | `/api/settings/<index>/trading` | Body `{ "enabled": true \| false }`. Updates `TRADINGENABLED` only. |
-| `DELETE` | `/api/settings/<index>` | Removes the row at `index`. |
+Settings:
+
+- `GET /api/settings`
+- `POST /api/settings`
+- `PUT /api/settings/<index>`
+- `PATCH /api/settings/<index>/trading`
+- `DELETE /api/settings/<index>`
+
+Strategy + positions:
+
+- `GET /api/strategy/status`
+- `POST /api/strategy/start`
+- `POST /api/strategy/stop`
+- `GET /api/net-positions`
+- `POST /api/net-positions/<position_id>/exit`
 
 ## Project layout
 
-```
+```text
 JsonProject1/
 ├── app.py
+├── strategy_runtime.py
+├── fyers_client.py
+├── FyresIntegration.py
 ├── requirements.txt
 ├── TradeSettings.csv
+├── FyersCredentials.csv
 ├── templates/
-│   ├── base.html           # Sidebar layout
-│   ├── index.html          # Symbol settings (table)
+│   ├── base.html
+│   ├── index.html
 │   ├── net_position.html
 │   ├── order_log.html
 │   └── app_log.html
 └── static/
     ├── css/style.css
     └── js/
-        ├── common.js       # Toasts + log storage helpers
-        ├── settings.js     # Symbol table + API
-        ├── app_log_page.js
-        └── order_log_page.js
+        ├── common.js
+        ├── layout.js
+        ├── settings.js
+        ├── order_log_page.js
+        └── app_log_page.js
 ```
 
 ## License
 
-Add a license file if you plan to distribute the project; none is included by default.
+No license file is included yet.

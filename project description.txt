@@ -1,0 +1,32 @@
+There will be three time frames (TimeRage1,TimeRage2,TimeRage3). All of them are changeable
+
+Will happen at the start of the day. We are running this on a 15-minute time frame, so at 9:30 we will be checking the 9:15 candle open value, and we are going to round this nearest StrikeStep value meaning
+suppose open= 23457 then nearest50 is 23450 
+we are going to create ce and pe contracts on this then we will wait tille completition of TimeRage1
+supose TimeRage1=9:45 so at 10 am we will mart high of 9:45 candle in both ce and pe contracts
+
+whosoever high is broker first we are going to open buy position in that option contract either ce or pe 
+at a time ony one position in one trade setting 
+
+our initial stoploss is 9:45 candle low and our initial target is 1: 1 
+
+then if stoploss is hit we will wait till next timeframe that is 11:30 and at 11: 45 we willcheck again which contract high is broken ce or pe , option contract are finalised at the start of day they wont change 
+and we repeat the step with 11:30 and 13:30 (condition will be checked on 13:45 if previous candle high is broken or not ) candle  
+
+stoploss is candle low 
+
+
+
+so fow should be like this when i click on startegy strategy you will first login to fyersapi
+then wait for 9:15 candle to close and at 89: 30 you will fetch historical data and fetch 9:15 candle opn price and create ce and pe contract
+
+then you subscribe the 2 ce and pe contract to websocket api
+
+
+then at completion of 9:45 candle means at 10 am we fetch hightorical ata and mark high of 9:45 candle and  check high breakout in ce or pe 
+whosoever breakout happen first we take entry in that
+
+if position is still running we will not trade 11:30 or 13:30 breakout , if position is closed we trade these two suppose 10 am posiiton got closed at 
+2 pm then we will not take trade in 11: 30 candle we will take trade in 3: 30 candle 
+
+
