@@ -7,7 +7,7 @@ import hashlib
 import os
 import threading
 import time as time_mod
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -18,6 +18,7 @@ import fyers_client
 IST = ZoneInfo("Asia/Kolkata")
 TRADE_CSV_PATH = Path(__file__).resolve().parent / "TradeSettings.csv"
 MAX_ORDER_EVENTS = 1500
+LEVEL_BUFFER_POINTS = 3.0
 
 _lock = threading.Lock()
 _running = False
@@ -68,6 +69,19 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _to_json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            out[str(k)] = _to_json_safe(v)
+        return out
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_safe(v) for v in value]
+    return str(value)
+
+
 def _parse_bool(v: str) -> bool:
     return str(v or "").strip().upper() in ("TRUE", "1", "YES", "ON")
 
@@ -115,7 +129,7 @@ def _is_market_closed_for_row(now_ist: datetime, squareoff_time: time) -> bool:
     strategy start should be blocked.
     """
     t = now_ist.time()
-    return t > squareoff_time or t < time(9, 15)
+    return t >= squareoff_time or t < time(9, 15)
 
 
 def _is_market_open_for_row(now_ist: datetime, squareoff_time: time) -> bool:
@@ -144,7 +158,7 @@ def _append_order_event(
     details: dict[str, Any] | None = None,
 ) -> None:
     global _order_events
-    now = datetime.now()
+    now = _now_ist()
     evt = {
         "ts": now.strftime("%H:%M:%S"),
         "date": now.strftime("%Y-%m-%d"),
@@ -153,7 +167,7 @@ def _append_order_event(
         "kind": kind or "info",
         "symbol": str(symbol or "").strip(),
         "pnl": None if pnl is None else round(_safe_float(pnl), 2),
-        "details": details or {},
+        "details": _to_json_safe(details or {}),
     }
     with _lock:
         _order_events.append(evt)
@@ -413,6 +427,10 @@ def _activate_window_if_due(st: dict, now: datetime) -> None:
             _log(f"Row {st['row_index']}: missing highs for window {tr.strftime('%H:%M')}.")
             s["processed_windows"].add(idx)
             return
+        ce_breakout = ce_high + LEVEL_BUFFER_POINTS
+        pe_breakout = pe_high + LEVEL_BUFFER_POINTS
+        ce_low_buffered = None if ce_low is None else ce_low - LEVEL_BUFFER_POINTS
+        pe_low_buffered = None if pe_low is None else pe_low - LEVEL_BUFFER_POINTS
         s["active_trigger"] = {
             "window_index": idx,
             "window_time": tr,
@@ -420,11 +438,16 @@ def _activate_window_if_due(st: dict, now: datetime) -> None:
             "pe_high": pe_high,
             "ce_low": ce_low,
             "pe_low": pe_low,
+            "ce_breakout": ce_breakout,
+            "pe_breakout": pe_breakout,
+            "ce_low_buffered": ce_low_buffered,
+            "pe_low_buffered": pe_low_buffered,
         }
         s["processed_windows"].add(idx)
         _log(
             f"Row {st['row_index']}: window {tr.strftime('%H:%M')} armed. "
-            f"CE H/L {ce_high:.2f}/{_safe_float(ce_low):.2f}, PE H/L {pe_high:.2f}/{_safe_float(pe_low):.2f}"
+            f"CE H/L {ce_high:.2f}/{_safe_float(ce_low):.2f}, PE H/L {pe_high:.2f}/{_safe_float(pe_low):.2f}, "
+            f"buffer={LEVEL_BUFFER_POINTS:.2f} -> CE breakout {ce_breakout:.2f}, PE breakout {pe_breakout:.2f}"
         )
         return
 
@@ -490,13 +513,15 @@ def _close_internal_position(st: dict, now: datetime, reason: str, market_price:
     if not pos:
         return False
     exit_price = _safe_float(market_price, pos["entry_price"])
+    stop_at_exit = _safe_float(pos.get("stop_price"))
     ok, meta = _place_squareoff(pos["symbol"], int(pos["qty"]))
-    if not ok:
+    is_paper_pos = bool(pos.get("paper_position"))
+    if not ok and not is_paper_pos:
         info = str(meta.get("message") or "Exit failed")
         _log(f"Row {st['row_index']}: exit failed ({reason}) for {pos['symbol']}: {info}")
         _set_message(f"Exit failed ({reason}) row {st['row_index']}: {info}")
         _append_order_event(
-            f"EXIT FAIL ({reason}) {pos['symbol']} qty={pos['qty']} err={info}",
+            f"ORDER EXIT FAIL {pos['symbol']} reason={reason} qty={pos['qty']} err={info}",
             kind="warn",
             symbol=pos["symbol"],
             details={
@@ -509,6 +534,22 @@ def _close_internal_position(st: dict, now: datetime, reason: str, market_price:
             },
         )
         return False
+    if not ok and is_paper_pos:
+        info = str(meta.get("message") or "Exit broker rejected; closing locally")
+        _append_order_event(
+            f"ORDER EXIT PAPER {pos['symbol']} reason={reason} qty={pos['qty']} broker_rejected={info}",
+            kind="warn",
+            symbol=pos["symbol"],
+            details={
+                "action": "SELL",
+                "order_type": "MARKET",
+                "reason": reason,
+                "request": meta.get("request"),
+                "response": meta.get("response"),
+                "qty": int(pos["qty"]),
+                "paper_position": True,
+            },
+        )
 
     realised = (exit_price - pos["entry_price"]) * pos["qty"]
     s["cum_realised"] = _safe_float(s.get("cum_realised"), 0.0) + realised
@@ -518,10 +559,15 @@ def _close_internal_position(st: dict, now: datetime, reason: str, market_price:
 
     msg = (
         f"EXIT {reason} {pos['symbol']} qty={pos['qty']} "
-        f"entry={pos['entry_price']:.2f} exit={exit_price:.2f} realised={realised:.2f}"
+        f"entry={pos['entry_price']:.2f} exit={exit_price:.2f} "
+        f"sl_at_exit={stop_at_exit:.2f} realised={realised:.2f}"
     )
     _append_order_event(
-        f"ORDER EXIT {pos['symbol']} {reason}",
+        (
+            f"ORDER EXIT {pos['symbol']} reason={reason} qty={pos['qty']} "
+            f"entry={pos['entry_price']:.2f} exit={exit_price:.2f} "
+            f"sl_at_exit={stop_at_exit:.2f} target_at_exit={_safe_float(pos.get('target_price')):.2f}"
+        ),
         kind="info",
         symbol=pos["symbol"],
         pnl=realised,
@@ -534,6 +580,11 @@ def _close_internal_position(st: dict, now: datetime, reason: str, market_price:
             "qty": int(pos["qty"]),
             "entry_price": round(_safe_float(pos["entry_price"]), 4),
             "exit_price": round(exit_price, 4),
+            "stop_price_at_exit": round(stop_at_exit, 4),
+            "target_price_at_exit": round(_safe_float(pos.get("target_price")), 4),
+            "paper_position": is_paper_pos,
+            "cum_realised_after_exit": round(_safe_float(s.get("cum_realised")), 4),
+            "total_pnl_after_exit": round(_safe_float(s.get("cum_realised")), 4),
         },
     )
     _set_message(msg)
@@ -554,34 +605,19 @@ def _check_and_enter(st: dict, now: datetime) -> None:
     chosen_symbol = ""
     chosen_ltp = 0.0
     chosen_low = None
-    if ce_ltp is not None and ce_ltp > trigger["ce_high"]:
+    if ce_ltp is not None and ce_ltp > _safe_float(trigger.get("ce_breakout"), trigger["ce_high"]):
         chosen_symbol = s["ce_symbol"]
         chosen_ltp = ce_ltp
-        chosen_low = trigger.get("ce_low")
-    elif pe_ltp is not None and pe_ltp > trigger["pe_high"]:
+        chosen_low = trigger.get("ce_low_buffered")
+    elif pe_ltp is not None and pe_ltp > _safe_float(trigger.get("pe_breakout"), trigger["pe_high"]):
         chosen_symbol = s["pe_symbol"]
         chosen_ltp = pe_ltp
-        chosen_low = trigger.get("pe_low")
+        chosen_low = trigger.get("pe_low_buffered")
     if not chosen_symbol:
         return
 
     ok, meta = _place_buy(chosen_symbol, st["quantity"])
-    if not ok:
-        err = str(meta.get("message") or "entry failed")
-        _append_order_event(
-            f"ENTRY FAIL {chosen_symbol} qty={st['quantity']} err={err}",
-            kind="warn",
-            symbol=chosen_symbol,
-            details={
-                "action": "BUY",
-                "order_type": "MARKET",
-                "request": meta.get("request"),
-                "response": meta.get("response"),
-                "qty": int(st["quantity"]),
-            },
-        )
-        _log(f"Row {st['row_index']}: entry order failed for {chosen_symbol}: {err}")
-        return
+    is_paper_position = not ok
 
     entry = max(0.01, _safe_float(chosen_ltp, 0.01))
     stop = _safe_float(chosen_low, 0.0)
@@ -605,25 +641,52 @@ def _check_and_enter(st: dict, now: datetime) -> None:
         "target_price": entry + risk * 0.9,
         "highest_price": entry,
         "order_id": str(meta.get("order_id") or ""),
+        "paper_position": is_paper_position,
     }
 
-    emsg = (
-        f"ENTRY {chosen_symbol} qty={st['quantity']} @ {entry:.2f} "
-        f"SL={stop:.2f} target(1:0.9)={entry + risk * 0.9:.2f}"
-    )
+    if is_paper_position:
+        err = str(meta.get("message") or "entry failed")
+        emsg = (
+            f"ENTRY PAPER {chosen_symbol} qty={st['quantity']} @ {entry:.2f} "
+            f"SL={stop:.2f} target(1:0.9)={entry + risk * 0.9:.2f} broker_rejected={err}"
+        )
+        kind = "warn"
+    else:
+        emsg = (
+            f"ENTRY {chosen_symbol} qty={st['quantity']} @ {entry:.2f} "
+            f"SL={stop:.2f} target(1:0.9)={entry + risk * 0.9:.2f}"
+        )
+        kind = "info"
     _append_order_event(
-        emsg,
-        kind="info",
+        (
+            f"ORDER ENTRY {chosen_symbol} qty={st['quantity']} entry={entry:.2f} "
+            f"initial_sl={stop:.2f} initial_target={entry + risk * 0.9:.2f}"
+            + (f" broker_rejected={str(meta.get('message') or 'entry failed')}" if is_paper_position else "")
+        ),
+        kind=kind,
         symbol=chosen_symbol,
         details={
             "action": "BUY",
             "order_type": "MARKET",
+            "reason": "ENTRY_BREAKOUT",
             "request": meta.get("request"),
             "response": meta.get("response"),
             "qty": int(st["quantity"]),
             "entry_price": round(entry, 4),
             "initial_stop_price": round(stop, 4),
             "initial_target_price": round(entry + risk * 0.9, 4),
+            "current_stop_price": round(stop, 4),
+            "current_target_price": round(entry + risk * 0.9, 4),
+            "paper_position": is_paper_position,
+            "breakout_price": round(
+                _safe_float(
+                    trigger.get(
+                        "ce_breakout" if chosen_symbol == s["ce_symbol"] else "pe_breakout",
+                        0.0,
+                    )
+                ),
+                4,
+            ),
         },
     )
     _set_message(emsg)
@@ -641,7 +704,28 @@ def _manage_open_position(st: dict, now: datetime) -> None:
         return
     pos["highest_price"] = max(_safe_float(pos.get("highest_price")), ltp)
 
-    if ltp <= _safe_float(pos["stop_price"]):
+    current_sl = _safe_float(pos["stop_price"])
+    if ltp <= current_sl:
+        _append_order_event(
+            (
+                f"ORDER EXIT TRIGGER {pos['symbol']} reason=SL_HIT "
+                f"ltp={ltp:.2f} current_sl={current_sl:.2f} qty={pos['qty']}"
+            ),
+            kind="warn",
+            symbol=pos["symbol"],
+            pnl=(ltp - _safe_float(pos["entry_price"])) * int(pos["qty"]),
+            details={
+                "action": "EXIT_TRIGGER",
+                "order_type": "SL",
+                "reason": "SL_HIT",
+                "qty": int(pos["qty"]),
+                "entry_price": round(_safe_float(pos["entry_price"]), 4),
+                "ltp_at_trigger": round(ltp, 4),
+                "current_stop_price": round(current_sl, 4),
+                "current_target_price": round(_safe_float(pos.get("target_price")), 4),
+                "paper_position": bool(pos.get("paper_position")),
+            },
+        )
         _close_internal_position(st, now, "SL_HIT", market_price=ltp)
         return
 
@@ -664,7 +748,10 @@ def _manage_open_position(st: dict, now: datetime) -> None:
             f"SL={new_sl:.2f}, next target 1:{next_r:.1f}"
         )
         _append_order_event(
-            f"ORDER TRAIL {pos['symbol']}",
+            (
+                f"ORDER TRAIL {pos['symbol']} trigger=1:{trigger_r:.1f} "
+                f"new_sl={new_sl:.2f} new_target={_safe_float(pos['target_price']):.2f}"
+            ),
             kind="info",
             symbol=pos["symbol"],
             details={
@@ -675,6 +762,8 @@ def _manage_open_position(st: dict, now: datetime) -> None:
                 "entry_price": round(entry, 4),
                 "new_stop_price": round(new_sl, 4),
                 "next_target_price": round(_safe_float(pos["target_price"]), 4),
+                "current_stop_price": round(new_sl, 4),
+                "current_target_price": round(_safe_float(pos["target_price"]), 4),
             },
         )
         _set_message(tmsg)
@@ -691,8 +780,29 @@ def _squareoff_due(st: dict, now: datetime) -> None:
     pos = s.get("open_position")
     if not pos:
         _log(f"Row {st['row_index']}: no open position at square-off {sq.strftime('%H:%M')}.")
+        _append_order_event(
+            f"ORDER SQUAREOFF CHECK row={st['row_index']} no_open_position at {sq.strftime('%H:%M')}",
+            kind="info",
+            details={"reason": "SQUAREOFF_TIME", "row_index": st["row_index"]},
+        )
         return
     ltp = _price_from_quotes(pos["symbol"])
+    _append_order_event(
+        (
+            f"ORDER EXIT TRIGGER {pos['symbol']} reason=SQUAREOFF_TIME "
+            f"ltp={_safe_float(ltp):.2f} configured_time={sq.strftime('%H:%M')}"
+        ),
+        kind="warn",
+        symbol=pos["symbol"],
+        details={
+            "action": "EXIT_TRIGGER",
+            "order_type": "TIME",
+            "reason": "SQUAREOFF_TIME",
+            "qty": int(pos["qty"]),
+            "ltp_at_trigger": round(_safe_float(ltp), 4),
+            "configured_squareoff_time": sq.strftime("%H:%M"),
+        },
+    )
     _close_internal_position(st, now, "SQUAREOFF_TIME", market_price=ltp)
 
 
@@ -724,12 +834,12 @@ def _engine_loop() -> None:
             _prepare_contracts_for_day(st, now)
         _start_option_websocket_if_needed()
         for st in _setting_states:
+            _squareoff_due(st, now)
             if not _is_market_open_for_row(now, st["squareoff_time"]):
                 continue
             _activate_window_if_due(st, now)
             _check_and_enter(st, now)
             _manage_open_position(st, now)
-            _squareoff_due(st, now)
         with _lock:
             _connected = True
         time_mod.sleep(1.0)
@@ -758,7 +868,7 @@ def start_strategy() -> tuple[bool, str]:
             _positions = [
                 {
                     "id": "dry-run-demo",
-                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "timestamp": _now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
                     "symbolname": "DEMO:MOCK-EQ",
                     "realisedpnl": 0.0,
                     "unrealisedpnl_pct": "1.25%",
@@ -836,13 +946,13 @@ def refresh_positions() -> list[dict]:
 
     if dry:
         with _lock:
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            now = _now_ist().strftime("%Y-%m-%d %H:%M:%S IST")
             for p in _positions:
                 p["timestamp"] = now
             return [p for p in _positions if p["id"] not in hidden]
 
     out: list[dict] = []
-    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_ist = _now_ist().strftime("%Y-%m-%d %H:%M:%S IST")
     for st in _setting_states:
         s = st["state"]
         pos = s.get("open_position")
@@ -856,16 +966,24 @@ def refresh_positions() -> list[dict]:
         entry = _safe_float(pos["entry_price"])
         qty = int(pos["qty"])
         unreal = 0.0 if ltp is None else (ltp - entry) * qty
+        realised = _safe_float(s.get("cum_realised"))
+        total_pnl = realised + unreal
         invested = abs(entry * qty) if entry and qty else 0.0
         unreal_pct = f"{(unreal / invested * 100):.2f}%" if invested > 0 else "—"
+        total_pct = f"{(total_pnl / invested * 100):.2f}%" if invested > 0 else "—"
         out.append(
             {
                 "id": pid,
-                "timestamp": now_utc,
+                "timestamp": now_ist,
                 "symbolname": sym,
-                "realisedpnl": round(_safe_float(s.get("cum_realised")), 2),
+                "realisedpnl": round(realised, 2),
                 "unrealisedpnl_pct": unreal_pct,
                 "unrealisedpnl_pts": round(unreal, 2),
+                "totalpnl": round(total_pnl, 2),
+                "totalpnl_pct": total_pct,
+                "currentsl": round(_safe_float(pos.get("stop_price")), 2),
+                "currenttarget": round(_safe_float(pos.get("target_price")), 2),
+                "paperposition": bool(pos.get("paper_position")),
             }
         )
 

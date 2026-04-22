@@ -231,6 +231,12 @@
       if (d.exit_price != null) parts.push("- exit_price: " + d.exit_price);
       if (d.initial_stop_price != null) parts.push("- initial_stop_price: " + d.initial_stop_price);
       if (d.initial_target_price != null) parts.push("- initial_target_price: " + d.initial_target_price);
+      if (d.current_stop_price != null) parts.push("- current_stop_price: " + d.current_stop_price);
+      if (d.current_target_price != null) parts.push("- current_target_price: " + d.current_target_price);
+      if (d.new_stop_price != null) parts.push("- new_stop_price: " + d.new_stop_price);
+      if (d.next_target_price != null) parts.push("- next_target_price: " + d.next_target_price);
+      if (d.stop_price_at_exit != null) parts.push("- stop_price_at_exit: " + d.stop_price_at_exit);
+      if (d.target_price_at_exit != null) parts.push("- target_price_at_exit: " + d.target_price_at_exit);
 
       if (d.request != null) {
         parts.push("");

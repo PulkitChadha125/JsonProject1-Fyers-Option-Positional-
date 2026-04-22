@@ -655,6 +655,14 @@
       tdPts.className = "td-mono";
       tdPts.textContent = p.unrealisedpnl_pts != null ? String(p.unrealisedpnl_pts) : "";
 
+      var tdSl = document.createElement("td");
+      tdSl.className = "td-mono";
+      tdSl.textContent = p.currentsl != null ? String(p.currentsl) : "";
+
+      var tdTgt = document.createElement("td");
+      tdTgt.className = "td-mono";
+      tdTgt.textContent = p.currenttarget != null ? String(p.currenttarget) : "";
+
       var tdAct = document.createElement("td");
       tdAct.className = "td-actions-narrow";
       var exitBtn = document.createElement("button");
@@ -672,6 +680,8 @@
       tr.appendChild(tdR);
       tr.appendChild(tdPct);
       tr.appendChild(tdPts);
+      tr.appendChild(tdSl);
+      tr.appendChild(tdTgt);
       tr.appendChild(tdAct);
       posTbody.appendChild(tr);
     });
