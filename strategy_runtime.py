@@ -497,13 +497,11 @@ def _place_squareoff(symbol: str, qty: int) -> tuple[bool, dict[str, Any]]:
 
 def _next_trigger_r(current: float) -> float:
     if current < 1.0:
-        return 1.4
+        return 1.5
     return round(current + 0.5, 2)
 
 
 def _trail_sl_for_trigger(entry: float, risk: float, trigger_r: float, current_sl: float) -> float:
-    if trigger_r < 1.0:
-        return max(current_sl, entry * (1.0 - 0.0245))
     return max(current_sl, entry + risk * (trigger_r - 0.4))
 
 
@@ -534,22 +532,9 @@ def _close_internal_position(st: dict, now: datetime, reason: str, market_price:
             },
         )
         return False
+    broker_rejected_info = ""
     if not ok and is_paper_pos:
-        info = str(meta.get("message") or "Exit broker rejected; closing locally")
-        _append_order_event(
-            f"ORDER EXIT PAPER {pos['symbol']} reason={reason} qty={pos['qty']} broker_rejected={info}",
-            kind="warn",
-            symbol=pos["symbol"],
-            details={
-                "action": "SELL",
-                "order_type": "MARKET",
-                "reason": reason,
-                "request": meta.get("request"),
-                "response": meta.get("response"),
-                "qty": int(pos["qty"]),
-                "paper_position": True,
-            },
-        )
+        broker_rejected_info = str(meta.get("message") or "Exit broker rejected; closing locally")
 
     realised = (exit_price - pos["entry_price"]) * pos["qty"]
     s["cum_realised"] = _safe_float(s.get("cum_realised"), 0.0) + realised
@@ -567,8 +552,9 @@ def _close_internal_position(st: dict, now: datetime, reason: str, market_price:
             f"ORDER EXIT {pos['symbol']} reason={reason} qty={pos['qty']} "
             f"entry={pos['entry_price']:.2f} exit={exit_price:.2f} "
             f"sl_at_exit={stop_at_exit:.2f} target_at_exit={_safe_float(pos.get('target_price')):.2f}"
+            + (f" broker_rejected={broker_rejected_info}" if broker_rejected_info else "")
         ),
-        kind="info",
+        kind="warn" if broker_rejected_info else "info",
         symbol=pos["symbol"],
         pnl=realised,
         details={
@@ -583,6 +569,7 @@ def _close_internal_position(st: dict, now: datetime, reason: str, market_price:
             "stop_price_at_exit": round(stop_at_exit, 4),
             "target_price_at_exit": round(_safe_float(pos.get("target_price")), 4),
             "paper_position": is_paper_pos,
+            "broker_rejected": broker_rejected_info if broker_rejected_info else None,
             "cum_realised_after_exit": round(_safe_float(s.get("cum_realised")), 4),
             "total_pnl_after_exit": round(_safe_float(s.get("cum_realised")), 4),
         },
@@ -637,8 +624,8 @@ def _check_and_enter(st: dict, now: datetime) -> None:
         "entry_price": entry,
         "stop_price": stop,
         "risk": risk,
-        "next_trigger_r": 0.9,
-        "target_price": entry + risk * 0.9,
+        "next_trigger_r": 1.0,
+        "target_price": entry + risk * 1.0,
         "highest_price": entry,
         "order_id": str(meta.get("order_id") or ""),
         "paper_position": is_paper_position,
@@ -648,19 +635,19 @@ def _check_and_enter(st: dict, now: datetime) -> None:
         err = str(meta.get("message") or "entry failed")
         emsg = (
             f"ENTRY PAPER {chosen_symbol} qty={st['quantity']} @ {entry:.2f} "
-            f"SL={stop:.2f} target(1:0.9)={entry + risk * 0.9:.2f} broker_rejected={err}"
+            f"SL={stop:.2f} target(1:1.0)={entry + risk * 1.0:.2f} broker_rejected={err}"
         )
         kind = "warn"
     else:
         emsg = (
             f"ENTRY {chosen_symbol} qty={st['quantity']} @ {entry:.2f} "
-            f"SL={stop:.2f} target(1:0.9)={entry + risk * 0.9:.2f}"
+            f"SL={stop:.2f} target(1:1.0)={entry + risk * 1.0:.2f}"
         )
         kind = "info"
     _append_order_event(
         (
             f"ORDER ENTRY {chosen_symbol} qty={st['quantity']} entry={entry:.2f} "
-            f"initial_sl={stop:.2f} initial_target={entry + risk * 0.9:.2f}"
+            f"initial_sl={stop:.2f} initial_target={entry + risk * 1.0:.2f}"
             + (f" broker_rejected={str(meta.get('message') or 'entry failed')}" if is_paper_position else "")
         ),
         kind=kind,
@@ -674,9 +661,9 @@ def _check_and_enter(st: dict, now: datetime) -> None:
             "qty": int(st["quantity"]),
             "entry_price": round(entry, 4),
             "initial_stop_price": round(stop, 4),
-            "initial_target_price": round(entry + risk * 0.9, 4),
+            "initial_target_price": round(entry + risk * 1.0, 4),
             "current_stop_price": round(stop, 4),
-            "current_target_price": round(entry + risk * 0.9, 4),
+            "current_target_price": round(entry + risk * 1.0, 4),
             "paper_position": is_paper_position,
             "breakout_price": round(
                 _safe_float(
@@ -706,64 +693,42 @@ def _manage_open_position(st: dict, now: datetime) -> None:
 
     current_sl = _safe_float(pos["stop_price"])
     if ltp <= current_sl:
-        _append_order_event(
-            (
-                f"ORDER EXIT TRIGGER {pos['symbol']} reason=SL_HIT "
-                f"ltp={ltp:.2f} current_sl={current_sl:.2f} qty={pos['qty']}"
-            ),
-            kind="warn",
-            symbol=pos["symbol"],
-            pnl=(ltp - _safe_float(pos["entry_price"])) * int(pos["qty"]),
-            details={
-                "action": "EXIT_TRIGGER",
-                "order_type": "SL",
-                "reason": "SL_HIT",
-                "qty": int(pos["qty"]),
-                "entry_price": round(_safe_float(pos["entry_price"]), 4),
-                "ltp_at_trigger": round(ltp, 4),
-                "current_stop_price": round(current_sl, 4),
-                "current_target_price": round(_safe_float(pos.get("target_price")), 4),
-                "paper_position": bool(pos.get("paper_position")),
-            },
-        )
         _close_internal_position(st, now, "SL_HIT", market_price=ltp)
         return
 
     entry = _safe_float(pos["entry_price"])
     risk = max(0.01, _safe_float(pos["risk"], 0.01))
-    trigger_r = _safe_float(pos["next_trigger_r"], 0.9)
+    trigger_r = _safe_float(pos["next_trigger_r"], 1.0)
 
     while ltp >= entry + risk * trigger_r:
         new_sl = _trail_sl_for_trigger(entry, risk, trigger_r, _safe_float(pos["stop_price"]))
         pos["stop_price"] = new_sl
-        if trigger_r < 1.0:
-            next_r = 1.5
-        else:
-            next_r = trigger_r + 0.5
+        next_r = trigger_r + 0.5
         pos["target_price"] = entry + risk * next_r
         pos["next_trigger_r"] = _next_trigger_r(trigger_r)
 
         tmsg = (
-            f"TRAIL {pos['symbol']} hit 1:{trigger_r:.1f} -> "
-            f"SL={new_sl:.2f}, next target 1:{next_r:.1f}"
+            f"TSL UPDATE {pos['symbol']} level 1:{trigger_r:.1f} -> "
+            f"new_tsl={new_sl:.2f}, new_target={_safe_float(pos['target_price']):.2f}"
         )
         _append_order_event(
             (
-                f"ORDER TRAIL {pos['symbol']} trigger=1:{trigger_r:.1f} "
-                f"new_sl={new_sl:.2f} new_target={_safe_float(pos['target_price']):.2f}"
+                f"ORDER TSL UPDATE {pos['symbol']} level=1:{trigger_r:.1f} "
+                f"new_tsl={new_sl:.2f} new_target={_safe_float(pos['target_price']):.2f}"
             ),
             kind="info",
             symbol=pos["symbol"],
             details={
                 "action": "HOLD",
-                "order_type": "TRAIL",
+                "order_type": "TSL",
                 "qty": int(pos["qty"]),
-                "reason": f"target_1:{trigger_r:.1f}_hit",
+                "reason": f"tsl_level_1:{trigger_r:.1f}_hit",
                 "entry_price": round(entry, 4),
                 "new_stop_price": round(new_sl, 4),
                 "next_target_price": round(_safe_float(pos["target_price"]), 4),
                 "current_stop_price": round(new_sl, 4),
                 "current_target_price": round(_safe_float(pos["target_price"]), 4),
+                "achieved_level": f"1:{trigger_r:.1f}",
             },
         )
         _set_message(tmsg)
@@ -787,22 +752,6 @@ def _squareoff_due(st: dict, now: datetime) -> None:
         )
         return
     ltp = _price_from_quotes(pos["symbol"])
-    _append_order_event(
-        (
-            f"ORDER EXIT TRIGGER {pos['symbol']} reason=SQUAREOFF_TIME "
-            f"ltp={_safe_float(ltp):.2f} configured_time={sq.strftime('%H:%M')}"
-        ),
-        kind="warn",
-        symbol=pos["symbol"],
-        details={
-            "action": "EXIT_TRIGGER",
-            "order_type": "TIME",
-            "reason": "SQUAREOFF_TIME",
-            "qty": int(pos["qty"]),
-            "ltp_at_trigger": round(_safe_float(ltp), 4),
-            "configured_squareoff_time": sq.strftime("%H:%M"),
-        },
-    )
     _close_internal_position(st, now, "SQUAREOFF_TIME", market_price=ltp)
 
 

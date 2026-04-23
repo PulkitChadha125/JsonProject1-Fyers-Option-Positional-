@@ -139,6 +139,22 @@
       .concat(serverLines)
       .map(normalizeLine)
       .filter(Boolean);
+    var seen = {};
+    lines = lines.filter(function (item) {
+      var key =
+        String(item.iso || "") +
+        "|" +
+        String(item.symbol || "") +
+        "|" +
+        String(item.kind || "") +
+        "|" +
+        String(item.message || "") +
+        "|" +
+        String(item.pnl == null ? "" : item.pnl);
+      if (seen[key]) return false;
+      seen[key] = true;
+      return true;
+    });
     lines.sort(function (a, b) {
       var ia = String(a.iso || "");
       var ib = String(b.iso || "");
@@ -188,6 +204,8 @@
     if (!pnlEl) return;
     var total = filtered.reduce(function (sum, item) {
       if (item.pnl == null) return sum;
+      var d = item.details || {};
+      if (String(d.action || "").toUpperCase() !== "SELL") return sum;
       return sum + safeNumber(item.pnl);
     }, 0);
     pnlEl.textContent = "Total P&L (selected): " + total.toFixed(2);
@@ -235,6 +253,7 @@
       if (d.current_target_price != null) parts.push("- current_target_price: " + d.current_target_price);
       if (d.new_stop_price != null) parts.push("- new_stop_price: " + d.new_stop_price);
       if (d.next_target_price != null) parts.push("- next_target_price: " + d.next_target_price);
+      if (d.achieved_level != null) parts.push("- achieved_level: " + d.achieved_level);
       if (d.stop_price_at_exit != null) parts.push("- stop_price_at_exit: " + d.stop_price_at_exit);
       if (d.target_price_at_exit != null) parts.push("- target_price_at_exit: " + d.target_price_at_exit);
 
