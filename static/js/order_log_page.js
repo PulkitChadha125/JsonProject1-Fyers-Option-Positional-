@@ -217,6 +217,21 @@
     return !!(item && item.details && typeof item.details === "object" && Object.keys(item.details).length);
   }
 
+  function formatTargetLevels(details) {
+    if (!details || !Array.isArray(details.next_10_target_levels)) return "";
+    var parts = details.next_10_target_levels
+      .map(function (row) {
+        if (!row || typeof row !== "object") return "";
+        var rr = row.rr != null ? String(row.rr) : "";
+        var px = safeNumber(row.price);
+        if (!rr) return "";
+        return rr + "=" + px.toFixed(2);
+      })
+      .filter(Boolean);
+    if (!parts.length) return "";
+    return "Next 10 Targets: " + parts.join(", ");
+  }
+
   function stringifyJson(v) {
     try {
       return JSON.stringify(v == null ? {} : v, null, 2);
@@ -316,6 +331,13 @@
       var pnlPart = item.pnl == null ? "" : " | P&L: " + safeNumber(item.pnl).toFixed(2);
       text.textContent = "[" + item.ts + "]" + symPart + " " + item.message + pnlPart;
       row.appendChild(text);
+      var targetLevelsText = formatTargetLevels(item.details || {});
+      if (targetLevelsText) {
+        var levels = document.createElement("span");
+        levels.className = "log-line__text";
+        levels.textContent = targetLevelsText;
+        row.appendChild(levels);
+      }
 
       if (hasDetails(item)) {
         var btn = document.createElement("button");

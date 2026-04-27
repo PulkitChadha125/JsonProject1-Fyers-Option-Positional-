@@ -501,8 +501,32 @@ def _next_trigger_r(current: float) -> float:
     return round(current + 0.5, 2)
 
 
+def _round_rr_label(level_r: float) -> str:
+    return f"{level_r:g}"
+
+
+def _compute_target_levels(entry: float, risk: float, count: int = 10) -> list[dict[str, float]]:
+    levels: list[dict[str, float]] = []
+    lvl = 1.0
+    for _ in range(max(0, count)):
+        price = entry + risk * lvl
+        levels.append({"rr": lvl, "price": price})
+        lvl = round(lvl + 0.5, 2)
+    return levels
+
+
 def _trail_sl_for_trigger(entry: float, risk: float, trigger_r: float, current_sl: float) -> float:
-    return max(current_sl, entry + risk * (trigger_r - 0.4))
+    # As requested:
+    # 1:1   -> trail SL to +3% from entry
+    # 1:1.5 -> trail SL to 1:0.5
+    # 1:2   -> trail SL to 1:1
+    # ...and so on (increase by +0.5R for every +0.5R trigger)
+    if trigger_r <= 1.0:
+        candidate = entry * 1.03
+    else:
+        sl_rr = max(0.5, trigger_r - 1.0)
+        candidate = entry + risk * sl_rr
+    return max(current_sl, candidate)
 
 
 def _close_internal_position(st: dict, now: datetime, reason: str, market_price: float | None = None) -> bool:
@@ -630,6 +654,13 @@ def _check_and_enter(st: dict, now: datetime) -> None:
         "order_id": str(meta.get("order_id") or ""),
         "paper_position": is_paper_position,
     }
+    level_rows = _compute_target_levels(entry, risk, count=10)
+    levels_msg = ", ".join(
+        [f"1:{_round_rr_label(row['rr'])}={row['price']:.2f}" for row in level_rows]
+    )
+    _log(
+        f"Row {st['row_index']}: entry target levels (next 10) for {chosen_symbol}: {levels_msg}"
+    )
 
     if is_paper_position:
         err = str(meta.get("message") or "entry failed")
@@ -674,6 +705,10 @@ def _check_and_enter(st: dict, now: datetime) -> None:
                 ),
                 4,
             ),
+            "next_10_target_levels": [
+                {"rr": f"1:{_round_rr_label(row['rr'])}", "price": round(row["price"], 4)}
+                for row in level_rows
+            ],
         },
     )
     _set_message(emsg)
@@ -706,14 +741,15 @@ def _manage_open_position(st: dict, now: datetime) -> None:
         next_r = trigger_r + 0.5
         pos["target_price"] = entry + risk * next_r
         pos["next_trigger_r"] = _next_trigger_r(trigger_r)
+        achieved_level = f"1:{_round_rr_label(trigger_r)}"
 
         tmsg = (
-            f"TSL UPDATE {pos['symbol']} level 1:{trigger_r:.1f} -> "
+            f"TSL UPDATE {pos['symbol']} level {achieved_level} -> "
             f"new_tsl={new_sl:.2f}, new_target={_safe_float(pos['target_price']):.2f}"
         )
         _append_order_event(
             (
-                f"ORDER TSL UPDATE {pos['symbol']} level=1:{trigger_r:.1f} "
+                f"ORDER TSL UPDATE {pos['symbol']} level={achieved_level} "
                 f"new_tsl={new_sl:.2f} new_target={_safe_float(pos['target_price']):.2f}"
             ),
             kind="info",
@@ -728,7 +764,7 @@ def _manage_open_position(st: dict, now: datetime) -> None:
                 "next_target_price": round(_safe_float(pos["target_price"]), 4),
                 "current_stop_price": round(new_sl, 4),
                 "current_target_price": round(_safe_float(pos["target_price"]), 4),
-                "achieved_level": f"1:{trigger_r:.1f}",
+                "achieved_level": achieved_level,
             },
         )
         _set_message(tmsg)
