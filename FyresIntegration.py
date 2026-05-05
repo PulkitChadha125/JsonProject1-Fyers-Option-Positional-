@@ -18,6 +18,7 @@ access_token=None
 fyers=None
 shared_data = {}
 shared_data_2 = {}
+option_fyers_socket = None
 # Lock to ensure thread-safe access to the shared data
 
 
@@ -535,7 +536,7 @@ def fyres_quote(symbol):
 
 def fyres_websocket_option(symbollist):
     from fyers_apiv3.FyersWebsocket import data_ws
-    global access_token
+    global access_token, option_fyers_socket
 
     def onmessage(message):
         """
@@ -592,6 +593,9 @@ def fyres_websocket_option(symbollist):
     # Replace the sample access token with your actual access token obtained from Fyers
     # access_token = "XC4XXXXXXM-100:eXXXXXXXXXXXXfZNSBoLo"
 
+    # If an older option socket exists, close it before starting a new one.
+    stop_option_websocket(clear_ltp=False)
+
     # Create a FyersDataSocket instance with the provided parameters
     fyers = data_ws.FyersDataSocket(
         access_token=access_token,  # Access token in the format "appid:accesstoken"
@@ -604,9 +608,28 @@ def fyres_websocket_option(symbollist):
         on_error=onerror,  # Callback function to handle WebSocket errors.
         on_message=onmessage  # Callback function to handle incoming messages from the WebSocket.
     )
+    option_fyers_socket = fyers
 
     # Establish a connection to the Fyers WebSocket
     fyers.connect()
+
+
+def stop_option_websocket(clear_ltp: bool = True):
+    global option_fyers_socket
+    sock = option_fyers_socket
+    option_fyers_socket = None
+    if sock is not None:
+        try:
+            if hasattr(sock, "disconnect"):
+                sock.disconnect()
+            elif hasattr(sock, "close_connection"):
+                sock.close_connection()
+            elif hasattr(sock, "close"):
+                sock.close()
+        except Exception as e:
+            print("Error while closing option websocket:", e)
+    if clear_ltp:
+        shared_data_2.clear()
 
 
 

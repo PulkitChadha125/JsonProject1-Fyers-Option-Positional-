@@ -910,10 +910,19 @@ def start_strategy() -> tuple[bool, str]:
 
 def stop_strategy() -> tuple[bool, str]:
     global _running, _connected, _last_message, _positions, _hidden_ids, _engine_thread
+    global _setting_states, _ws_thread, _ws_last_signature, _ws_retry_after_monotonic
     _engine_stop.set()
     if _engine_thread and _engine_thread.is_alive():
         _engine_thread.join(timeout=2.0)
     _engine_thread = None
+    _ws_thread = None
+    _ws_last_signature = ""
+    _ws_retry_after_monotonic = 0.0
+    _setting_states = []
+    try:
+        fyers_integration.stop_option_websocket(clear_ltp=True)
+    except Exception as e:
+        _log(f"Option websocket close failed: {e}")
 
     with _lock:
         _running = False
