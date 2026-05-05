@@ -105,11 +105,15 @@ def _parse_expiry_code(expires_on: str, exp_type: str = "") -> str:
     s = str(expires_on or "").strip()
     if not s:
         return ""
-    _ = str(exp_type or "").strip().upper()
+    et = str(exp_type or "").strip().upper()
     for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
         try:
             d = datetime.strptime(s, fmt).date()
-            # Example: 28-04-2026 -> 26APR (format seen in Fyers search).
+            if et == "WEEKLY":
+                # Weekly format required by user: YY + M + DD
+                # Example: 05-05-2026 -> 26505
+                return f"{d.strftime('%y')}{d.month}{d.strftime('%d')}"
+            # Monthly format remains unchanged: YYMMM (e.g., 26APR).
             return d.strftime("%y%b").upper()
         except ValueError:
             continue
