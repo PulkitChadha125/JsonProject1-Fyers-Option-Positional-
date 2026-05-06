@@ -298,6 +298,12 @@
   }
 
   function render() {
+    var prevScrollTop = el.scrollTop;
+    var prevClientHeight = el.clientHeight;
+    var prevScrollHeight = el.scrollHeight;
+    var distanceFromBottom = prevScrollHeight - (prevScrollTop + prevClientHeight);
+    var shouldStickToBottom = distanceFromBottom <= 24;
+
     el.innerHTML = "";
     var lines = getMergedLines();
     populateSymbolOptions(lines);
@@ -317,7 +323,12 @@
         row.textContent = "[—] No entries match this filter.";
       }
       el.appendChild(row);
-      el.scrollTop = 0;
+      if (shouldStickToBottom) {
+        el.scrollTop = el.scrollHeight;
+      } else {
+        var maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+        el.scrollTop = Math.min(prevScrollTop, maxTop);
+      }
       return;
     }
 
@@ -352,7 +363,12 @@
 
       el.appendChild(row);
     });
-    el.scrollTop = el.scrollHeight;
+    if (shouldStickToBottom) {
+      el.scrollTop = el.scrollHeight;
+    } else {
+      var maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+      el.scrollTop = Math.min(prevScrollTop, maxTop);
+    }
   }
 
   function fetchServerOrders() {

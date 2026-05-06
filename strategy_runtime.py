@@ -18,7 +18,6 @@ import fyers_client
 IST = ZoneInfo("Asia/Kolkata")
 TRADE_CSV_PATH = Path(__file__).resolve().parent / "TradeSettings.csv"
 MAX_ORDER_EVENTS = 1500
-LEVEL_BUFFER_POINTS = 3.0
 
 _lock = threading.Lock()
 _running = False
@@ -431,10 +430,9 @@ def _activate_window_if_due(st: dict, now: datetime) -> None:
             _log(f"Row {st['row_index']}: missing highs for window {tr.strftime('%H:%M')}.")
             s["processed_windows"].add(idx)
             return
-        ce_breakout = ce_high + LEVEL_BUFFER_POINTS
-        pe_breakout = pe_high + LEVEL_BUFFER_POINTS
-        ce_low_buffered = None if ce_low is None else ce_low - LEVEL_BUFFER_POINTS
-        pe_low_buffered = None if pe_low is None else pe_low - LEVEL_BUFFER_POINTS
+        # No extra point buffer: use exact trigger-candle high/low.
+        ce_breakout = ce_high
+        pe_breakout = pe_high
         s["active_trigger"] = {
             "window_index": idx,
             "window_time": tr,
@@ -444,14 +442,12 @@ def _activate_window_if_due(st: dict, now: datetime) -> None:
             "pe_low": pe_low,
             "ce_breakout": ce_breakout,
             "pe_breakout": pe_breakout,
-            "ce_low_buffered": ce_low_buffered,
-            "pe_low_buffered": pe_low_buffered,
         }
         s["processed_windows"].add(idx)
         _log(
             f"Row {st['row_index']}: window {tr.strftime('%H:%M')} armed. "
             f"CE H/L {ce_high:.2f}/{_safe_float(ce_low):.2f}, PE H/L {pe_high:.2f}/{_safe_float(pe_low):.2f}, "
-            f"buffer={LEVEL_BUFFER_POINTS:.2f} -> CE breakout {ce_breakout:.2f}, PE breakout {pe_breakout:.2f}"
+            f"no buffer -> CE breakout {ce_breakout:.2f}, PE breakout {pe_breakout:.2f}"
         )
         return
 
@@ -623,11 +619,11 @@ def _check_and_enter(st: dict, now: datetime) -> None:
     if ce_ltp is not None and ce_ltp > _safe_float(trigger.get("ce_breakout"), trigger["ce_high"]):
         chosen_symbol = s["ce_symbol"]
         chosen_ltp = ce_ltp
-        chosen_low = trigger.get("ce_low_buffered")
+        chosen_low = trigger.get("ce_low")
     elif pe_ltp is not None and pe_ltp > _safe_float(trigger.get("pe_breakout"), trigger["pe_high"]):
         chosen_symbol = s["pe_symbol"]
         chosen_ltp = pe_ltp
-        chosen_low = trigger.get("pe_low_buffered")
+        chosen_low = trigger.get("pe_low")
     if not chosen_symbol:
         return
 
