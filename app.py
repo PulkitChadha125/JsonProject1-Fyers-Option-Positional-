@@ -8,6 +8,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 
 import strategy_runtime
+from token_scheduler import start_daily_token_scheduler
 
 BASE_DIR = Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / "TradeSettings.csv"
@@ -202,6 +203,9 @@ def api_net_position_exit(position_id: str):
 @app.get("/api/orders")
 def api_orders():
     return jsonify({"orders": strategy_runtime.get_order_events()})
+
+
+start_daily_token_scheduler()
 
 
 if __name__ == "__main__":

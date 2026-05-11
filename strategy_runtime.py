@@ -34,7 +34,6 @@ _ws_thread: threading.Thread | None = None
 _ws_last_signature: str = ""
 _ws_retry_after_monotonic: float = 0.0
 
-
 def _log(msg: str) -> None:
     print(f"[Strategy] {msg}", flush=True)
 
@@ -805,6 +804,21 @@ def _reset_state_for_new_day(st: dict, d: date) -> None:
     s["active_trigger"] = None
     s["squareoff_done"] = False
     s["cum_realised"] = 0.0
+
+
+
+def reset_after_scheduled_token_refresh() -> None:
+    """Close option websocket and clear WS reconnect state so the next connection uses the new token."""
+    global _ws_last_signature, _ws_retry_after_monotonic
+    with _lock:
+        _ws_last_signature = ""
+        _ws_retry_after_monotonic = 0.0
+    fyers_integration.stop_option_websocket(clear_ltp=True)
+
+
+def append_order_event_scheduled(message: str, kind: str = "info") -> None:
+    """Order-log entry from background token scheduler (works when strategy is stopped)."""
+    _append_order_event(message, kind=kind)
 
 
 def _engine_loop() -> None:

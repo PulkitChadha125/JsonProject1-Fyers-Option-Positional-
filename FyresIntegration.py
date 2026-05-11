@@ -19,7 +19,49 @@ fyers=None
 shared_data = {}
 shared_data_2 = {}
 option_fyers_socket = None
+_ws_ssl_patch_installed = False
 # Lock to ensure thread-safe access to the shared data
+
+
+def ensure_websocket_ssl_for_fyers() -> None:
+    """
+    Fyers WebSocket uses websocket-client without passing CA certs; on some Windows/VPS images
+    this raises SSL: CERTIFICATE_VERIFY_FAILED. We inject certifi's bundle into run_forever.
+
+    Environment:
+      FYERS_WS_SSL_VERIFY=0  — disable TLS verification (insecure; last resort).
+    """
+    global _ws_ssl_patch_installed
+    if _ws_ssl_patch_installed:
+        return
+    import ssl
+    import websocket
+
+    _orig = websocket.WebSocketApp.run_forever
+
+    def _run_forever(self, *args, **kwargs):
+        sslopt = dict(kwargs.pop("sslopt", None) or {})
+        verify = (os.environ.get("FYERS_WS_SSL_VERIFY") or "1").strip().lower()
+        if verify in ("0", "false", "no", "off"):
+            sslopt["cert_reqs"] = ssl.CERT_NONE
+            if not getattr(ensure_websocket_ssl_for_fyers, "_warned_insecure", False):
+                print(
+                    "[Fyers WS] FYERS_WS_SSL_VERIFY=0: TLS verification disabled (insecure).",
+                    flush=True,
+                )
+                setattr(ensure_websocket_ssl_for_fyers, "_warned_insecure", True)
+        else:
+            try:
+                import certifi
+
+                sslopt.setdefault("ca_certs", certifi.where())
+            except ImportError:
+                pass
+        kwargs["sslopt"] = sslopt
+        return _orig(self, *args, **kwargs)
+
+    websocket.WebSocketApp.run_forever = _run_forever
+    _ws_ssl_patch_installed = True
 
 
 def _redact_for_log(obj):
@@ -40,6 +82,7 @@ def _redact_for_log(obj):
                     "identifier",
                     "cookie",
                     "details",
+                    "auth",
                 ):
                     out[k] = "***"
                 elif isinstance(v, (dict, list)):
@@ -89,20 +132,62 @@ def apiactivation(client_id, redirect_uri, response_type, state, secret_key, gra
         return None
 
 
-def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
-
-    pd.set_option('display.max_columns', None)
-    warnings.filterwarnings('ignore')
+def automated_login(client_id, secret_key, FY_ID, TOTP_KEY, PIN, redirect_uri):
+    """Fyers app login (OTP + PIN) then exchange for API access_token via SessionModel.generate_token."""
+    pd.set_option("display.max_columns", None)
+    warnings.filterwarnings("ignore")
 
     import base64
-
 
     def getEncodedString(string):
         string = str(string)
         base64_bytes = base64.b64encode(string.encode("ascii"))
         return base64_bytes.decode("ascii")
 
-    global fyers,access_token
+    def _split_client_id(value: str) -> tuple[str, str]:
+        raw = str(value or "").strip()
+        if "-" in raw:
+            app_id, app_type = raw.rsplit("-", 1)
+            return app_id.strip(), app_type.strip()
+        return raw, "100"
+
+    def _require_ok(payload: dict, step_name: str, required_keys: list[str] | None = None) -> None:
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"{step_name} failed: invalid response type")
+        if str(payload.get("s", "")).lower() != "ok":
+            msg = payload.get("message") or payload.get("error") or payload
+            code = payload.get("code")
+            raise RuntimeError(f"{step_name} failed (code={code}): {msg}")
+        if required_keys:
+            for key in required_keys:
+                if key not in payload:
+                    raise RuntimeError(f"{step_name} failed: missing key '{key}' in response")
+
+    def _auth_code_from_token_response(token_resp: dict[str, object]) -> str:
+        """Older API returns redirect Url with auth_code; newer returns data.auth JWT."""
+        url = token_resp.get("Url") or token_resp.get("url")
+        if url:
+            parsed = urlparse(str(url))
+            vals = parse_qs(parsed.query).get("auth_code") or []
+            if vals:
+                return vals[0]
+        data = token_resp.get("data")
+        if isinstance(data, dict):
+            for key in ("auth", "auth_code"):
+                v = data.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        v = token_resp.get("auth_code")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        raise RuntimeError(
+            "api/v3/token: could not get auth code (no Url/auth_code and no data.auth). "
+            f"Keys: {list(token_resp.keys())}"
+        )
+
+    global fyers, access_token
+
+    app_id, app_type = _split_client_id(client_id)
 
     URL_SEND_LOGIN_OTP = "https://api-t2.fyers.in/vagator/v2/send_login_otp_v2"
     response = requests.post(url=URL_SEND_LOGIN_OTP, json={"fy_id": getEncodedString(FY_ID), "app_id": "2"})
@@ -112,37 +197,49 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
     except Exception:
         print("OTP step response: <non-json>")
     res = response.json()
+    _require_ok(res, "send_login_otp_v2", required_keys=["request_key"])
 
-    if datetime.now().second % 30 > 27: sleep(5)
+    if datetime.now().second % 30 > 27:
+        sleep(5)
     URL_VERIFY_OTP = "https://api-t2.fyers.in/vagator/v2/verify_otp"
-    res2 = requests.post(url=URL_VERIFY_OTP,
-                         json={"request_key": res["request_key"], "otp": pyotp.TOTP(TOTP_KEY).now()}).json()
+    res2 = requests.post(
+        url=URL_VERIFY_OTP,
+        json={"request_key": res["request_key"], "otp": pyotp.TOTP(TOTP_KEY).now()},
+    ).json()
     print("verify_otp:", _redact_for_log(res2))
+    _require_ok(res2, "verify_otp", required_keys=["request_key"])
 
     ses = requests.Session()
-    URL_VERIFY_OTP2 = "https://api-t2.fyers.in/vagator/v2/verify_pin_v2"
-    payload2 = {"request_key": res2["request_key"], "identity_type": "pin", "identifier": getEncodedString(PIN)}
-    res3 = ses.post(url=URL_VERIFY_OTP2, json=payload2).json()
-    print("verify_pin_v2:", _redact_for_log(res3))
+    URL_VERIFY_PIN = "https://api-t2.fyers.in/vagator/v2/verify_pin_v2"
+    payload_pin = {"request_key": res2["request_key"], "identity_type": "pin", "identifier": getEncodedString(PIN)}
+    pin_resp = ses.post(url=URL_VERIFY_PIN, json=payload_pin).json()
+    print("verify_pin_v2:", _redact_for_log(pin_resp))
+    _require_ok(pin_resp, "verify_pin_v2", required_keys=["data"])
+    if not isinstance(pin_resp.get("data"), dict) or "access_token" not in pin_resp["data"]:
+        raise RuntimeError("verify_pin_v2 failed: access_token missing in data")
 
-    ses.headers.update({
-        'authorization': f"Bearer {res3['data']['access_token']}"
-    })
+    ses.headers.update({"authorization": f"Bearer {pin_resp['data']['access_token']}"})
 
     TOKENURL = "https://api-t1.fyers.in/api/v3/token"
-    payload3 = {"fyers_id": FY_ID,
-                "app_id": client_id[:-4],
-                "redirect_uri": redirect_uri,
-                "appType": "100", "code_challenge": "",
-                "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
+    payload3 = {
+        "fyers_id": FY_ID,
+        "app_id": app_id,
+        "redirect_uri": redirect_uri,
+        "appType": app_type,
+        "code_challenge": "",
+        "state": "None",
+        "scope": "",
+        "nonce": "",
+        "response_type": "code",
+        "create_cookie": True,
+    }
 
-    res3 = ses.post(url=TOKENURL, json=payload3).json()
-    print("token redirect response:", _redact_for_log(res3))
-    url = res3['Url']
-    parsed = urlparse(url)
-    auth_code = parse_qs(parsed.query)['auth_code'][0]
+    token_resp = ses.post(url=TOKENURL, json=payload3).json()
+    print("token redirect response:", _redact_for_log(token_resp))
+    _require_ok(token_resp, "api/v3/token")
+
+    auth_code = _auth_code_from_token_response(token_resp)
     grant_type = "authorization_code"
-
     response_type = "code"
 
     session = fyersModel.SessionModel(
@@ -150,11 +247,13 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
         secret_key=secret_key,
         redirect_uri=redirect_uri,
         response_type=response_type,
-        grant_type=grant_type
+        grant_type=grant_type,
     )
     session.set_token(auth_code)
-    response = session.generate_token()
-    access_token = response['access_token']
+    gen = session.generate_token()
+    if not isinstance(gen, dict) or not gen.get("access_token"):
+        raise RuntimeError(f"generate_token failed: {gen}")
+    access_token = gen["access_token"]
     print("access_token obtained (length %d)" % len(str(access_token)))
     fyers = fyersModel.FyersModel(client_id=client_id, is_async=False, token=access_token, log_path=os.getcwd())
     prof = fyers.get_profile()
@@ -506,6 +605,8 @@ def fyres_websocket(symbollist):
     # Replace the sample access token with your actual access token obtained from Fyers
     # access_token = "XC4XXXXXXM-100:eXXXXXXXXXXXXfZNSBoLo"
 
+    ensure_websocket_ssl_for_fyers()
+
     # Create a FyersDataSocket instance with the provided parameters
     fyers = data_ws.FyersDataSocket(
         access_token=access_token,  # Access token in the format "appid:accesstoken"
@@ -596,6 +697,8 @@ def fyres_websocket_option(symbollist):
     # If an older option socket exists, close it before starting a new one.
     stop_option_websocket(clear_ltp=False)
 
+    ensure_websocket_ssl_for_fyers()
+
     # Create a FyersDataSocket instance with the provided parameters
     fyers = data_ws.FyersDataSocket(
         access_token=access_token,  # Access token in the format "appid:accesstoken"
@@ -673,6 +776,15 @@ def place_order(symbol,quantity,type,side,price):
     
     print("Order data: ", data)
     response = fyers.place_order(data=data)
-    print("response: ",response)
+    print("response: ", response)
+    if isinstance(response, dict) and response.get("s") == "error":
+        msg = str(response.get("message") or "")
+        code = response.get("code")
+        if code == -50 or "algo" in msg.lower():
+            print(
+                "[Fyers] If you see 'Algo orders are not allowed': enable Algo / API trading "
+                "for this app in Fyers My API (developer portal), then retry.",
+                flush=True,
+            )
     return response
 
