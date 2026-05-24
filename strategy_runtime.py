@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import os
+import re
 import threading
 import time as time_mod
 from datetime import date, datetime, time, timedelta
@@ -85,17 +86,40 @@ def _parse_bool(v: str) -> bool:
 
 
 def _parse_hhmm(v: str) -> time | None:
+    """
+    Parse time for TIMERAGE / square-off columns.
+
+    Accepts: 24h \"13:30\", 12h \"1:30 PM\" / \"01:30pm\", and strips seconds if present.
+    """
     s = str(v or "").strip()
     if not s:
         return None
-    parts = s.split(":")
+    low = s.lower()
+    is_pm = "pm" in low
+    is_am = "am" in low
+    core = re.sub(r"(?i)\s*(a\.?m\.?|p\.?m\.?)\s*", "", s).strip()
+    parts = core.split(":")
     if len(parts) < 2:
         return None
     try:
-        hh = max(0, min(23, int(parts[0])))
-        mm = max(0, min(59, int(parts[1])))
+        hh = int(re.sub(r"\D", "", parts[0]) or -1)
+        if hh < 0 or hh > 23:
+            return None
+        mm_str = parts[1]
+        mm_digits = "".join(ch for ch in mm_str if ch.isdigit())
+        if not mm_digits:
+            return None
+        mm = int(mm_digits[:2])
+        if mm > 59:
+            return None
     except ValueError:
         return None
+    if is_pm and hh < 12:
+        hh += 12
+    if is_am and hh == 12:
+        hh = 0
+    hh = max(0, min(23, hh))
+    mm = max(0, min(59, mm))
     return time(hour=hh, minute=mm)
 
 
@@ -111,8 +135,9 @@ def _parse_expiry_code(expires_on: str, exp_type: str = "") -> str:
                 # Weekly format required by user: YY + M + DD
                 # Example: 05-05-2026 -> 26505
                 return f"{d.strftime('%y')}{d.month}{d.strftime('%d')}"
-            # Monthly format remains unchanged: YYMMM (e.g., 26APR).
-            return d.strftime("%y%b").upper()
+            # Monthly: YY + English month abbr + strike added later (e.g. NIFTY26MAY22000PE).
+            months = ("", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+            return f"{d.strftime('%y')}{months[d.month]}"
         except ValueError:
             continue
     return ""
@@ -412,7 +437,9 @@ def _prepare_contracts_for_day(st: dict, now: datetime) -> None:
 
 def _activate_window_if_due(st: dict, now: datetime) -> None:
     s = st["state"]
-    if not s["prepared"] or s["entry_done"]:
+    # Block new windows only while a position is open (not "entry_done" alone — a rejected
+    # broker order used to set entry_done and blocked all later TIMERAGE slots for the day).
+    if not s["prepared"] or s.get("open_position"):
         return
     for idx, tr in enumerate(st["time_ranges"]):
         if idx in s["processed_windows"]:
@@ -426,8 +453,10 @@ def _activate_window_if_due(st: dict, now: datetime) -> None:
         ce_low = _fetch_candle_value(s["ce_symbol"], candle_dt, "low")
         pe_low = _fetch_candle_value(s["pe_symbol"], candle_dt, "low")
         if ce_high is None or pe_high is None:
-            _log(f"Row {st['row_index']}: missing highs for window {tr.strftime('%H:%M')}.")
-            s["processed_windows"].add(idx)
+            _log(
+                f"Row {st['row_index']}: OHLC not ready yet for window {tr.strftime('%H:%M')} "
+                f"(CE/PE 15m highs); will retry — not marking window done."
+            )
             return
         # No extra point buffer: use exact trigger-candle high/low.
         ce_breakout = ce_high
@@ -605,7 +634,7 @@ def _close_internal_position(st: dict, now: datetime, reason: str, market_price:
 def _check_and_enter(st: dict, now: datetime) -> None:
     s = st["state"]
     trigger = s.get("active_trigger")
-    if not trigger or s["entry_done"]:
+    if not trigger or s.get("open_position"):
         return
     ce_ltp = _price_from_quotes(s["ce_symbol"])
     pe_ltp = _price_from_quotes(s["pe_symbol"])

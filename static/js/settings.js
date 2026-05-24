@@ -60,7 +60,7 @@
 
   function isExpTypeColumn(name) {
     var n = normalizeHeaderName(name);
-    return n === "exptype";
+    return n === "exptype" || n === "expirytype" || n === "expierytype";
   }
 
   function isExpiryDateColumn(name) {
@@ -248,11 +248,13 @@
 
   function syncDraftFromModal() {
     if (!modalForm || !draftRow) return;
-    modalForm.querySelectorAll("input[data-col-index]").forEach(function (el) {
+    modalForm.querySelectorAll("input[data-col-index], select[data-col-index]").forEach(function (el) {
       var ci = parseInt(el.getAttribute("data-col-index"), 10);
       if (isNaN(ci) || ci < 0 || ci >= headers.length) return;
       if (ci === tradingIndex) return;
-      if (el.type === "time") {
+      if (el.tagName === "SELECT") {
+        draftRow[ci] = el.value || "";
+      } else if (el.type === "time") {
         draftRow[ci] = el.value || "";
       } else if (el.type === "date" && isExpiryDateColumn(headers[ci])) {
         draftRow[ci] = fromDateInputValue(el.value || "");

@@ -39,6 +39,29 @@
     return Number.isFinite(n) ? n : 0;
   }
 
+  /** Show date + time on each line (e.g. 13/05/2026 07:22:41) for multi-day review. */
+  function formatDisplayStamp(item) {
+    if (!item) return "—";
+    var dateKey = item.date != null ? String(item.date).trim() : "";
+    var timeStr = item.ts != null ? String(item.ts).trim() : "";
+    if (!dateKey && item.iso) {
+      var iso = String(item.iso);
+      if (iso.length >= 10) dateKey = iso.slice(0, 10);
+      if (!timeStr && iso.length >= 19) timeStr = iso.slice(11, 19);
+    }
+    var displayDate = "";
+    if (dateKey && /^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+      var p = dateKey.split("-");
+      displayDate = p[2] + "/" + p[1] + "/" + p[0];
+    } else if (dateKey) {
+      displayDate = dateKey;
+    }
+    if (displayDate && timeStr) return displayDate + " " + timeStr;
+    if (displayDate) return displayDate;
+    if (timeStr) return timeStr;
+    return "—";
+  }
+
   function normalizeLine(item) {
     if (!item || typeof item !== "object") return null;
     return {
@@ -245,8 +268,7 @@
     if (detailTitle) detailTitle.textContent = "Order details" + (item.symbol ? " - " + item.symbol : "");
 
     var parts = [];
-    parts.push("Date: " + (item.date || ""));
-    parts.push("Time: " + (item.ts || ""));
+    parts.push("Date & time: " + formatDisplayStamp(item));
     parts.push("Symbol: " + (item.symbol || "-"));
     parts.push("Kind: " + (item.kind || "info"));
     if (item.pnl != null) parts.push("P&L: " + safeNumber(item.pnl).toFixed(2));
@@ -340,7 +362,7 @@
       text.className = "log-line__text";
       var symPart = item.symbol ? " [" + item.symbol + "]" : "";
       var pnlPart = item.pnl == null ? "" : " | P&L: " + safeNumber(item.pnl).toFixed(2);
-      text.textContent = "[" + item.ts + "]" + symPart + " " + item.message + pnlPart;
+      text.textContent = "[" + formatDisplayStamp(item) + "]" + symPart + " " + item.message + pnlPart;
       row.appendChild(text);
       var targetLevelsText = formatTargetLevels(item.details || {});
       if (targetLevelsText) {
