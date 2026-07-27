@@ -1050,6 +1050,35 @@ body.modal-open {
   color: var(--text-secondary);
 }
 
+.modal-field__timerange {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.modal-field__timerange .modal-input {
+  flex: 1 1 8rem;
+  min-width: 7rem;
+}
+
+.modal-field__timerange-text {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  min-width: 4.5rem;
+}
+
+.btn-trade-toggle--sm {
+  width: 28px;
+  height: 28px;
+}
+
+.td-timerange-off {
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+
 @media (max-width: 560px) {
   .modal-form {
     grid-template-columns: 1fr;

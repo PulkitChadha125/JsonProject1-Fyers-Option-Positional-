@@ -47,8 +47,43 @@
 
   function isTimeColumn(name) {
     var n = normalizeHeaderName(name);
-    // Supports StartTime/StopTime and variants like TimeRage1/TimeRange2.
+    // Square-off / generic time fields (not TimeRageN or *Enabled).
+    if (isTimeRageColumn(name) || isTimeRageEnabledColumn(name)) return false;
     return n.indexOf("time") !== -1;
+  }
+
+  function isTimeRageColumn(name) {
+    var n = normalizeHeaderName(name);
+    return n === "timerage1" || n === "timerage2" || n === "timerage3" ||
+      n === "timerange1" || n === "timerange2" || n === "timerange3";
+  }
+
+  function isTimeRageEnabledColumn(name) {
+    var n = normalizeHeaderName(name);
+    return (
+      n === "timerage1enabled" ||
+      n === "timerage2enabled" ||
+      n === "timerage3enabled" ||
+      n === "timerange1enabled" ||
+      n === "timerange2enabled" ||
+      n === "timerange3enabled"
+    );
+  }
+
+  function timeRageSlot(name) {
+    var n = normalizeHeaderName(name);
+    var m = n.match(/^time(?:rage|range)([123])(?:enabled)?$/);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  function findTimeRageEnabledIndex(slot) {
+    for (var i = 0; i < headers.length; i++) {
+      var n = normalizeHeaderName(headers[i]);
+      if (n === "timerage" + slot + "enabled" || n === "timerange" + slot + "enabled") {
+        return i;
+      }
+    }
+    return -1;
   }
 
   function parseTrading(val) {
@@ -125,6 +160,7 @@
     var out = [];
     for (var i = 1; i < headers.length; i++) {
       if (i === tradingIndex) continue;
+      if (isTimeRageEnabledColumn(headers[i])) continue;
       out.push(i);
     }
     return out;
@@ -163,6 +199,8 @@
     modalForm.innerHTML = "";
 
     for (var ci = 0; ci < headers.length; ci++) {
+      if (isTimeRageEnabledColumn(headers[ci])) continue;
+
       var field = document.createElement("div");
       field.className = "modal-field";
 
@@ -199,6 +237,68 @@
         field.appendChild(lab);
         field.appendChild(row);
         modalForm.appendChild(field);
+        continue;
+      }
+
+      if (isTimeRageColumn(headers[ci])) {
+        (function (timeColIndex, slotNum) {
+          var enableIdx = findTimeRageEnabledIndex(slotNum);
+          var wrap = document.createElement("div");
+          wrap.className = "modal-field__timerange";
+          var timeInput = document.createElement("input");
+          timeInput.type = "time";
+          timeInput.className = "modal-input";
+          timeInput.id = "mf-" + timeColIndex;
+          timeInput.value = toTimeInputValue(draftRow[timeColIndex]);
+          timeInput.setAttribute("data-col-index", String(timeColIndex));
+          var enabled = true;
+          if (enableIdx >= 0) {
+            var rawEn = String(draftRow[enableIdx] || "").trim();
+            enabled = rawEn === "" ? true : parseTrading(rawEn);
+          }
+          var ebtn = document.createElement("button");
+          ebtn.type = "button";
+          ebtn.className =
+            "btn-trade-toggle btn-trade-toggle--sm modal-timerange-toggle " +
+            (enabled ? "is-on" : "is-off");
+          ebtn.setAttribute("aria-pressed", enabled ? "true" : "false");
+          ebtn.setAttribute(
+            "aria-label",
+            enabled ? "Window enabled; click to disable" : "Window disabled; click to enable"
+          );
+          ebtn.setAttribute("title", enabled ? "Window ON" : "Window OFF");
+          ebtn.innerHTML =
+            '<span class="btn-trade-toggle__icon" aria-hidden="true">▶</span>';
+          if (enableIdx >= 0) {
+            ebtn.setAttribute("data-enable-col-index", String(enableIdx));
+          }
+          var elabel = document.createElement("span");
+          elabel.className = "modal-field__timerange-text";
+          elabel.textContent = enabled ? "Enabled" : "Disabled";
+          function applyTimeRageEnabledState(nextOn) {
+            timeInput.disabled = !nextOn;
+            ebtn.classList.toggle("is-on", nextOn);
+            ebtn.classList.toggle("is-off", !nextOn);
+            ebtn.setAttribute("aria-pressed", nextOn ? "true" : "false");
+            ebtn.setAttribute(
+              "aria-label",
+              nextOn ? "Window enabled; click to disable" : "Window disabled; click to enable"
+            );
+            ebtn.setAttribute("title", nextOn ? "Window ON" : "Window OFF");
+            elabel.textContent = nextOn ? "Enabled" : "Disabled";
+            if (enableIdx >= 0) draftRow[enableIdx] = nextOn ? "TRUE" : "FALSE";
+          }
+          applyTimeRageEnabledState(enabled);
+          ebtn.addEventListener("click", function () {
+            applyTimeRageEnabledState(!ebtn.classList.contains("is-on"));
+          });
+          wrap.appendChild(timeInput);
+          wrap.appendChild(ebtn);
+          wrap.appendChild(elabel);
+          field.appendChild(lab);
+          field.appendChild(wrap);
+          modalForm.appendChild(field);
+        })(ci, timeRageSlot(headers[ci]));
         continue;
       }
 
@@ -261,6 +361,11 @@
       } else {
         draftRow[ci] = el.value;
       }
+    });
+    modalForm.querySelectorAll(".modal-timerange-toggle[data-enable-col-index]").forEach(function (btn) {
+      var ei = parseInt(btn.getAttribute("data-enable-col-index"), 10);
+      if (isNaN(ei) || ei < 0 || ei >= draftRow.length) return;
+      draftRow[ei] = btn.classList.contains("is-on") ? "TRUE" : "FALSE";
     });
     var tbtn = modalForm.querySelector(".modal-trade-toggle");
     if (tbtn && tradingIndex >= 0 && tradingIndex < draftRow.length) {
@@ -349,6 +454,20 @@
     var td = document.createElement("td");
     td.className = "td-scroll";
     var v = row[colIndex] != null ? String(row[colIndex]) : "";
+    if (isTimeRageColumn(headers[colIndex])) {
+      var slot = timeRageSlot(headers[colIndex]);
+      var ei = findTimeRageEnabledIndex(slot);
+      var on = true;
+      if (ei >= 0) {
+        var raw = row[ei] != null ? String(row[ei]).trim() : "";
+        on = raw === "" ? true : parseTrading(raw);
+      }
+      var label = (v || "—") + (on ? " · ON" : " · OFF");
+      td.textContent = label;
+      td.title = label;
+      if (!on) td.classList.add("td-timerange-off");
+      return td;
+    }
     td.textContent = v;
     td.title = v;
     return td;

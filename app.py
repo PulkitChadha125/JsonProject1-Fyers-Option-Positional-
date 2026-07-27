@@ -16,6 +16,62 @@ CSV_PATH = BASE_DIR / "TradeSettings.csv"
 app = Flask(__name__)
 
 
+def _norm_header(name: str) -> str:
+    return "".join(ch for ch in str(name or "").upper() if ch.isalnum())
+
+
+def _ensure_timerange_enabled_columns(
+    headers: list[str], data: list[list[str]]
+) -> tuple[list[str], list[list[str]], bool]:
+    """
+    Ensure TimeRage1/2/3Enabled columns exist (default TRUE).
+    Inserted immediately after each TimeRageN / TimeRangeN column when missing.
+    """
+    hdr = list(headers)
+    rows = [list(r) for r in data]
+    changed = False
+    for n in (1, 2, 3):
+        time_names = {f"TIMERAGE{n}", f"TIMERANGE{n}"}
+        enable_names = {f"TIMERAGE{n}ENABLED", f"TIMERANGE{n}ENABLED"}
+        norms = [_norm_header(h) for h in hdr]
+        if any(x in enable_names for x in norms):
+            continue
+        time_i = next((i for i, x in enumerate(norms) if x in time_names), -1)
+        if time_i < 0:
+            continue
+        insert_at = time_i + 1
+        col_name = f"TimeRage{n}Enabled"
+        hdr.insert(insert_at, col_name)
+        for r in rows:
+            while len(r) < insert_at:
+                r.append("")
+            r.insert(insert_at, "TRUE")
+        changed = True
+    # Normalize bool-ish values in enable columns.
+    norms = [_norm_header(h) for h in hdr]
+    for n in (1, 2, 3):
+        enable_names = {f"TIMERAGE{n}ENABLED", f"TIMERANGE{n}ENABLED"}
+        ei = next((i for i, x in enumerate(norms) if x in enable_names), -1)
+        if ei < 0:
+            continue
+        for r in rows:
+            while len(r) <= ei:
+                r.append("")
+            te = str(r[ei] or "").strip().upper()
+            if not te:
+                r[ei] = "TRUE"
+                changed = True
+            elif te in ("TRUE", "1", "YES", "ON"):
+                if r[ei] != "TRUE":
+                    r[ei] = "TRUE"
+                    changed = True
+            else:
+                if r[ei] != "FALSE":
+                    r[ei] = "FALSE"
+                    changed = True
+    return hdr, rows, changed
+
+
 def _read_csv() -> tuple[list[str], list[list[str]]]:
     if not CSV_PATH.is_file():
         return [], []
@@ -34,6 +90,9 @@ def _read_csv() -> tuple[list[str], list[list[str]]]:
         elif len(r) > w:
             r = r[:w]
         data_rows.append(r)
+    headers, data_rows, migrated = _ensure_timerange_enabled_columns(headers, data_rows)
+    if migrated:
+        _write_csv(headers, data_rows)
     return headers, data_rows
 
 
@@ -51,6 +110,11 @@ def _trading_col_index(headers: list[str]) -> int:
     raise ValueError("CSV must include TRADINGENABLED column")
 
 
+def _normalize_bool_cell(v: str) -> str:
+    te = str(v or "").strip().upper()
+    return "TRUE" if te in ("TRUE", "1", "YES", "ON", "") else "FALSE"
+
+
 def _normalize_row(values: list[str], width: int) -> list[str]:
     row = [str(v).strip() if v is not None else "" for v in values]
     if len(row) < width:
@@ -66,6 +130,17 @@ def _default_empty_row(headers: list[str]) -> list[str]:
         out[_trading_col_index(headers)] = "FALSE"
     except ValueError:
         pass
+    for i, h in enumerate(headers):
+        n = _norm_header(h)
+        if n in (
+            "TIMERAGE1ENABLED",
+            "TIMERAGE2ENABLED",
+            "TIMERAGE3ENABLED",
+            "TIMERANGE1ENABLED",
+            "TIMERANGE2ENABLED",
+            "TIMERANGE3ENABLED",
+        ):
+            out[i] = "TRUE"
     return out
 
 
@@ -112,6 +187,10 @@ def api_settings_add():
         new_row[ti] = "TRUE" if te in ("TRUE", "1", "YES", "ON") else "FALSE"
     except ValueError:
         pass
+    for i, h in enumerate(headers):
+        n = _norm_header(h)
+        if n.endswith("ENABLED") and n.startswith(("TIMERAGE", "TIMERANGE")):
+            new_row[i] = _normalize_bool_cell(new_row[i] if new_row[i] else "TRUE")
     rows.append(new_row)
     _write_csv(headers, rows)
     return jsonify({"ok": True, "index": len(rows) - 1, "row": new_row})
@@ -133,6 +212,10 @@ def api_settings_update(row_index: int):
         row[ti] = "TRUE" if te in ("TRUE", "1", "YES", "ON") else "FALSE"
     except ValueError:
         pass
+    for i, h in enumerate(headers):
+        n = _norm_header(h)
+        if n.endswith("ENABLED") and n.startswith(("TIMERAGE", "TIMERANGE")):
+            row[i] = _normalize_bool_cell(row[i])
     rows[row_index] = row
     _write_csv(headers, rows)
     return jsonify({"ok": True, "row": row})

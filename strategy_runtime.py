@@ -339,10 +339,21 @@ def _load_active_settings() -> tuple[list[dict], str]:
         qty = _safe_int(val("QUANTITY"), 0)
         step = _safe_int(val("STRIKESTEP"), 50)
         sq_time = _parse_hhmm(val("SQAUREOFFTIME") or val("SQUAREOFFTIME")) or time(15, 10)
-        t1 = _parse_hhmm(val("TIMERAGE1"))
-        t2 = _parse_hhmm(val("TIMERAGE2"))
-        t3 = _parse_hhmm(val("TIMERAGE3"))
-        ranges = [x for x in (t1, t2, t3) if x is not None]
+
+        def _window_enabled(n: int) -> bool:
+            raw = val(f"TIMERAGE{n}ENABLED") or val(f"TIMERANGE{n}ENABLED")
+            # Missing column / blank => enabled (backward compatible).
+            if raw == "":
+                return True
+            return _parse_bool(raw)
+
+        ranges: list[time] = []
+        for n, raw_key in ((1, "TIMERAGE1"), (2, "TIMERAGE2"), (3, "TIMERAGE3")):
+            if not _window_enabled(n):
+                continue
+            t = _parse_hhmm(val(raw_key) or val(f"TIMERANGE{n}"))
+            if t is not None:
+                ranges.append(t)
         exp_type = val("EXPTYPE")
         expiry_code = _parse_expiry_code(val("EXPIERYDATE"), exp_type)
         if not sym or not base or qty <= 0 or not ranges or not expiry_code:
@@ -371,6 +382,7 @@ def _load_active_settings() -> tuple[list[dict], str]:
                     "entry_done": False,
                     "open_position": None,
                     "processed_windows": set(),
+                    "window_start_ok": set(),
                     "active_trigger": None,
                     "squareoff_done": False,
                     "cum_realised": 0.0,
@@ -435,19 +447,60 @@ def _prepare_contracts_for_day(st: dict, now: datetime) -> None:
     )
 
 
+def _cancel_time_window(st: dict, idx: int, tr: time, reason: str) -> None:
+    """Mark a TIMERAGE window invalid for the rest of the day (no late arming after exit)."""
+    s = st["state"]
+    s["processed_windows"].add(idx)
+    trigger = s.get("active_trigger")
+    if isinstance(trigger, dict) and trigger.get("window_index") == idx:
+        s["active_trigger"] = None
+    label = tr.strftime("%H:%M")
+    msg = f"Window {label} cancelled — {reason}"
+    _log(f"Row {st['row_index']}: {msg}")
+    _append_order_event(
+        msg,
+        kind="info",
+        details={"reason": reason, "window_time": label, "window_index": idx},
+    )
+
+
 def _activate_window_if_due(st: dict, now: datetime) -> None:
     s = st["state"]
-    # Block new windows only while a position is open (not "entry_done" alone — a rejected
-    # broker order used to set entry_done and blocked all later TIMERAGE slots for the day).
-    if not s["prepared"] or s.get("open_position"):
+    if not s["prepared"]:
         return
+    window_start_ok: set[int] = s.setdefault("window_start_ok", set())
     for idx, tr in enumerate(st["time_ranges"]):
         if idx in s["processed_windows"]:
             continue
-        chk = datetime.combine(now.date(), tr, tzinfo=IST) + timedelta(minutes=15)
-        if now < chk:
+        window_start = datetime.combine(now.date(), tr, tzinfo=IST)
+        check_time = window_start + timedelta(minutes=15)
+
+        # At window time (e.g. 13:30): must be flat or this window is cancelled for the day.
+        if now >= window_start and idx not in window_start_ok:
+            if s.get("open_position"):
+                _cancel_time_window(
+                    st,
+                    idx,
+                    tr,
+                    "position open at window time — setup invalid (must be flat before this window)",
+                )
+                continue
+            window_start_ok.add(idx)
+
+        if now < check_time:
             continue
-        candle_dt = datetime.combine(now.date(), tr, tzinfo=IST)
+
+        # At check time (e.g. 13:45): must still be flat to arm breakout levels.
+        if s.get("open_position"):
+            _cancel_time_window(
+                st,
+                idx,
+                tr,
+                "position open at check time — setup invalid (must be flat when trigger candle completes)",
+            )
+            continue
+
+        candle_dt = window_start
         ce_high = _fetch_candle_value(s["ce_symbol"], candle_dt, "high")
         pe_high = _fetch_candle_value(s["pe_symbol"], candle_dt, "high")
         ce_low = _fetch_candle_value(s["ce_symbol"], candle_dt, "low")
@@ -830,6 +883,7 @@ def _reset_state_for_new_day(st: dict, d: date) -> None:
     s["entry_done"] = False
     s["open_position"] = None
     s["processed_windows"] = set()
+    s["window_start_ok"] = set()
     s["active_trigger"] = None
     s["squareoff_done"] = False
     s["cum_realised"] = 0.0
